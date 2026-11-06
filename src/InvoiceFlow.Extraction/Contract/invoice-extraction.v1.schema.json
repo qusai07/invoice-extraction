@@ -1,0 +1,51 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "document_type", "supplier_name", "supplier_trn", "customer_trn", "invoice_number", "invoice_date",
+    "due_date", "po_number", "currency", "subtotal", "vat_total", "total", "iban", "lines"
+  ],
+  "properties": {
+    "document_type": { "type": "string", "enum": ["invoice", "credit_note", "other"] },
+    "supplier_name": { "$ref": "#/$defs/field" },
+    "supplier_trn": { "$ref": "#/$defs/field" },
+    "customer_trn": { "$ref": "#/$defs/field" },
+    "invoice_number": { "$ref": "#/$defs/field" },
+    "invoice_date": { "$ref": "#/$defs/field" },
+    "due_date": { "$ref": "#/$defs/field" },
+    "po_number": { "$ref": "#/$defs/field" },
+    "currency": { "$ref": "#/$defs/field" },
+    "subtotal": { "$ref": "#/$defs/field" },
+    "vat_total": { "$ref": "#/$defs/field" },
+    "total": { "$ref": "#/$defs/field" },
+    "iban": { "$ref": "#/$defs/field" },
+    "lines": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["sku", "description", "quantity", "unit_price", "line_total", "vat_rate", "page"],
+        "properties": {
+          "sku": { "type": ["string", "null"] },
+          "description": { "type": ["string", "null"] },
+          "quantity": { "type": ["string", "null"] },
+          "unit_price": { "type": ["string", "null"] },
+          "line_total": { "type": ["string", "null"] },
+          "vat_rate": { "type": ["string", "null"] },
+          "page": { "type": ["integer", "null"] }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "field": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["value", "page"],
+      "properties": {
+        "value": { "type": ["string", "null"], "description": "Exactly as printed. null if not on the document." },
+        "page": { "type": ["integer", "null"], "description": "1-based page where the value appears." }
+      }
+    }
+  }
+}

@@ -1,0 +1,27 @@
+{
+  "meta": {
+    "source": "synthetic",
+    "language": "ar-en",
+    "quality": "digital-pdf",
+    "tags": ["multi-line"],
+    "notes": "Example of the expected-answer format. Not part of the dataset."
+  },
+  "invoice": {
+    "supplierName": "Al Noor Office Supplies LLC",
+    "supplierTrn": "100123456700003",
+    "customerTrn": "100987654300003",
+    "invoiceNumber": "INV-2026-00412",
+    "invoiceDate": "2026-10-14",
+    "dueDate": "2026-11-13",
+    "poNumber": "PO-45-001178",
+    "currency": "AED",
+    "lines": [
+      { "sku": "PAP-A4-80", "description": "A4 paper 80gsm (box of 5 reams)", "quantity": 20, "unitPrice": 95.00, "lineTotal": 1900.00, "vatRate": 0.05 },
+      { "sku": "TON-HP-26A", "description": "HP 26A toner cartridge", "quantity": 4, "unitPrice": 412.50, "lineTotal": 1650.00, "vatRate": 0.05 }
+    ],
+    "subtotal": 3550.00,
+    "vatTotal": 177.50,
+    "total": 3727.50,
+    "iban": "AE070331234567890123456"
+  }
+}

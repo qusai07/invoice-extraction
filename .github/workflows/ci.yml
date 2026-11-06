@@ -1,0 +1,77 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      - name: Restore
+        run: dotnet restore InvoiceFlow.sln
+
+      - name: Build
+        run: dotnet build InvoiceFlow.sln --no-restore -c Release
+
+      - name: Test
+        run: dotnet test InvoiceFlow.sln --no-build -c Release --logger trx --collect:"XPlat Code Coverage"
+
+      - name: Dataset check
+        # Fails if any eval document is missing its .expected.json or has invalid JSON.
+        run: dotnet run --project evals/InvoiceFlow.Evals -c Release --no-build -- check --data evals/data
+
+      - name: Eval pipeline self-test
+        # ground-truth extractor + real validation rules must score 100% (fields AND decisions);
+        # otherwise the scorer, the dataset, the generator or a rule is broken.
+        run: dotnet run --project evals/InvoiceFlow.Evals -c Release --no-build -- run --data evals/data --extractor ground-truth --reports ${{ runner.temp }}/reports --expect-perfect
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-results
+          path: "**/TestResults/**"
+
+  containers-and-infra:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build API image
+        run: docker build -f src/InvoiceFlow.Api/Dockerfile -t invoiceflow-api:ci .
+      - name: Build worker image
+        run: docker build -f src/InvoiceFlow.Worker/Dockerfile -t invoiceflow-worker:ci .
+      - name: Build web image
+        run: docker build -t invoiceflow-web:ci --build-arg API_BASE_URL=http://invflow-api web
+      - name: No developer settings in images
+        run: |
+          ! docker run --rm --entrypoint ls invoiceflow-api:ci /app/appsettings.Development.json
+      - name: Bicep build + lint
+        run: az bicep build --file infra/main.bicep --stdout > /dev/null
+
+  web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - run: npm ci
+      - name: Audit (production dependencies)
+        run: npm audit --omit=dev --audit-level=moderate
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm run build

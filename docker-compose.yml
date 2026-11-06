@@ -1,0 +1,110 @@
+# Local development.
+#   copy .env.example .env      (set a strong SA password)
+#   docker compose up -d                          → SQL Server + Azurite (dependencies only)
+#   docker compose --profile app up -d --build    → + API, worker, web on http://localhost:3100 (dev sign-in)
+#   docker compose --profile security up -d       → + ClamAV (set Security__MalwareScan__Provider=ClamAV)
+
+name: invoiceflow
+
+x-dotnet-env: &dotnet-env
+  DOTNET_ENVIRONMENT: Development
+  ASPNETCORE_ENVIRONMENT: Development
+  ConnectionStrings__InvoiceFlow: "Server=sql;Database=InvoiceFlow;User Id=sa;Password=${MSSQL_SA_PASSWORD};TrustServerCertificate=True"
+  Storage__Provider: AzureBlob
+  # Azurite's documented development account (public, local only).
+  Storage__AzureBlob__ConnectionString: "DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=http://azurite:10000/devstoreaccount1;"
+  Security__MalwareScan__Provider: ${MALWARE_SCAN_PROVIDER:-None}
+  Security__MalwareScan__ClamAV__Host: clamav
+  Extraction__Provider: ${EXTRACTION_PROVIDER:-replay}
+  Extraction__Replay__DatasetDir: /dataset
+  Extraction__AzureOpenAI__Endpoint: ${AZURE_OPENAI_ENDPOINT:-}
+  Extraction__AzureOpenAI__Deployment: ${AZURE_OPENAI_DEPLOYMENT:-}
+  Extraction__AzureOpenAI__ApiKey: ${AZURE_OPENAI_API_KEY:-}
+  OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+
+services:
+  sql:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_SA_PASSWORD: ${MSSQL_SA_PASSWORD:?Set MSSQL_SA_PASSWORD in .env}
+      MSSQL_PID: Developer
+    ports:
+      - "${SQL_PORT:-14330}:1433"
+    volumes:
+      - sql-data:/var/opt/mssql
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P \"$$MSSQL_SA_PASSWORD\" -Q 'SELECT 1' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  # Azure Blob Storage emulator — original invoice files.
+  azurite:
+    image: mcr.microsoft.com/azure-storage/azurite:latest
+    command: azurite --blobHost 0.0.0.0 --queueHost 0.0.0.0 --tableHost 0.0.0.0 --skipApiVersionCheck --loose
+    ports:
+      - "10000:10000"
+      - "10001:10001"
+      - "10002:10002"
+    volumes:
+      - azurite-data:/data
+
+  clamav:
+    profiles: ["security"]
+    image: clamav/clamav:stable
+    ports:
+      - "3310:3310"
+    volumes:
+      - clamav-db:/var/lib/clamav
+
+  api:
+    profiles: ["app"]
+    build:
+      context: .
+      dockerfile: src/InvoiceFlow.Api/Dockerfile
+    environment:
+      <<: *dotnet-env
+      Auth__Mode: Dev
+      Database__MigrateOnStartup: "true"
+      ForwardedHeaders__Enabled: "false"
+    volumes:
+      - ./evals/data:/dataset:ro
+    ports:
+      - "5080:8080"
+    depends_on:
+      sql:
+        condition: service_healthy
+      azurite:
+        condition: service_started
+
+  worker:
+    profiles: ["app"]
+    build:
+      context: .
+      dockerfile: src/InvoiceFlow.Worker/Dockerfile
+    environment:
+      <<: *dotnet-env
+    volumes:
+      - ./evals/data:/dataset:ro
+    depends_on:
+      api:
+        condition: service_started
+
+  web:
+    profiles: ["app"]
+    build:
+      context: web
+      args:
+        API_BASE_URL: http://api:8080
+        NEXT_PUBLIC_AUTH_MODE: dev
+    ports:
+      - "3100:3000"
+    depends_on:
+      - api
+
+volumes:
+  sql-data:
+  azurite-data:
+  clamav-db:

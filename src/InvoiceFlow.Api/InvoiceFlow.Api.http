@@ -1,0 +1,6 @@
+@InvoiceFlow.Api_HostAddress = http://localhost:5080
+
+GET {{InvoiceFlow.Api_HostAddress}}/health
+Accept: text/plain
+
+###

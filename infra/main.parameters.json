@@ -1,0 +1,16 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "prefix": { "value": "invflow" },
+    "location": { "value": "uaenorth" },
+    "sqlAdminGroupName": { "value": "<entra-group-name>" },
+    "sqlAdminGroupObjectId": { "value": "<entra-group-object-id>" },
+    "apiAudience": { "value": "api://<api-app-registration-client-id>" },
+    "apiImage": { "value": "<acr>.azurecr.io/invoiceflow-api:<version>" },
+    "workerImage": { "value": "<acr>.azurecr.io/invoiceflow-worker:<version>" },
+    "webImage": { "value": "<acr>.azurecr.io/invoiceflow-web:<version>" },
+    "companyTrns": { "value": [] },
+    "approvalThreshold": { "value": 100000 }
+  }
+}
