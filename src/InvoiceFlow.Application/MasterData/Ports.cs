@@ -11,6 +11,9 @@ public interface IMasterDataService
     Task<IReadOnlyList<Supplier>> SearchSuppliersAsync(string name, CancellationToken cancellationToken = default);
 
     Task<PurchaseOrder?> GetPurchaseOrderAsync(string poNumber, CancellationToken cancellationToken = default);
+
+    /// <summary>The supplier's open purchase orders, so a reviewer can pick the right one instead of guessing.</summary>
+    Task<IReadOnlyList<PurchaseOrder>> ListOpenPurchaseOrdersAsync(string supplierId, CancellationToken cancellationToken = default);
 }
 
 /// <summary>Invoices already received, for duplicate detection (DUP-001 / DUP-002).</summary>

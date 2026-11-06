@@ -36,22 +36,23 @@ export function RuleChip({ code, severity = "Error" }: { code: string; severity?
         severity === "Info" && "bg-sky-50 text-sky-800 ring-1 ring-sky-200",
       )}
     >
-      <span className="ltr-value font-mono">{code}</span>
-      <span>{rule(code)}</span>
+      {/* Name first; the code is a small reference (it looked like a PO number when shown first). */}
+      <span className="font-medium">{rule(code)}</span>
+      <span className="ltr-value font-mono text-[10px] opacity-60">{code}</span>
     </span>
   );
 }
 
 export function Toast({ message, kind = "info", onDone }: { message: string; kind?: "info" | "error"; onDone: () => void }) {
   useEffect(() => {
-    const id = setTimeout(onDone, 5000);
+    const id = setTimeout(onDone, kind === "error" ? 8000 : 5000); // problems need longer to read
     return () => clearTimeout(id);
-  }, [onDone]);
+  }, [onDone, kind]);
   return (
     <div
       role="status"
       className={clsx(
-        "fixed bottom-4 end-4 z-50 rounded-md px-4 py-2 text-sm shadow-lg",
+        "fixed bottom-4 end-4 z-50 max-w-[min(28rem,calc(100vw-2rem))] rounded-md px-4 py-2 text-sm shadow-lg",
         kind === "error" ? "bg-red-700 text-white" : "bg-slate-800 text-white",
       )}
     >

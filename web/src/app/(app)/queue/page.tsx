@@ -7,6 +7,7 @@ import { useQuery } from "@tanstack/react-query";
 import { RefreshCw } from "lucide-react";
 import clsx from "clsx";
 import { api } from "@/lib/api";
+import { personLabel } from "@/lib/people";
 import { useAuth } from "@/lib/auth";
 import { useI18n, type I18nKey } from "@/lib/i18n";
 import type { InvoiceStatus, InvoiceSummary } from "@/lib/types";
@@ -115,7 +116,7 @@ function QueueInner() {
                       {inv.errorCodes.map((c) => <RuleChip key={c} code={c} />)}
                     </div>
                   </Td>
-                  <Td className="text-slate-500">{inv.submittedBy}</Td>
+                  <Td className="text-slate-500"><span dir="auto">{personLabel(inv.submittedBy, inv.submittedByName, t)}</span></Td>
                 </tr>
               ))}
             </tbody>

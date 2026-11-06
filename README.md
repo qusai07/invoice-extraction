@@ -33,9 +33,12 @@ dotnet user-secrets --project src/InvoiceFlow.Api set ConnectionStrings:InvoiceF
 dotnet user-secrets --project src/InvoiceFlow.Api set Bootstrap:AdminEmail    "you@company.com"
 dotnet user-secrets --project src/InvoiceFlow.Api set Bootstrap:AdminPassword "<temporary password>"
 dotnet user-secrets --project src/InvoiceFlow.Api set Auth:Session:SigningKey "<32+ random bytes, base64>"
+dotnet user-secrets --project src/InvoiceFlow.Api set Auth:Session:MfaEncryptionKey "<exactly 32 random bytes, base64>"
 ```
 
-On first start the API creates built-in roles and this administrator. The administrator must choose a new password (12+ characters) at first sign-in. Remove `Bootstrap:AdminPassword` afterwards.
+Generate each key with `[Convert]::ToBase64String((1..32 | % { Get-Random -Max 256 }) -as [byte[]])` (PowerShell) or `openssl rand -base64 32`. Keep the MFA key stable: losing it means everyone sets up two-step sign-in again.
+
+On first start the API creates built-in roles and this administrator (as **Super admin**). The administrator must choose a new password (12+ characters) at first sign-in, then set up **two-step sign-in** with an authenticator app (required for anyone who can administer or approve; to try the app locally without it, set `Auth:Session:RequireMfaForPrivileged` to `false` in user-secrets). Remove `Bootstrap:AdminPassword` afterwards.
 
 **3. API**
 

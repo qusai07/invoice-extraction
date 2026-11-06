@@ -9,6 +9,7 @@ import { useAuth } from "@/lib/auth";
 import { useI18n } from "@/lib/i18n";
 import { PERMISSIONS } from "@/lib/permissions";
 import { Card, ErrorNote, PageHeader, Toast } from "@/components/ui";
+import { SUPER_ADMIN, roleDescription, roleName } from "@/lib/roles";
 
 interface Role { id: string; name: string; description: string; isSystem: boolean; permissions: string[]; userCount: number }
 
@@ -86,7 +87,7 @@ export default function RolesPage() {
               <li key={r.id}>
                 <button onClick={() => setSelected(r.id)} className={clsx("flex w-full items-center gap-2 rounded-md px-3 py-2 text-start text-sm",
                   selected === r.id ? "bg-brand-50 font-medium text-brand-700" : "hover:bg-slate-50")}>
-                  <span className="flex-1">{r.name}</span>
+                  <span className="flex-1">{roleName(r.name, lang)}</span>
                   {r.isSystem && <Lock size={12} className="text-slate-400" aria-label={t("roles.system")} />}
                   <span className="text-xs text-slate-400">{r.userCount}</span>
                 </button>
@@ -98,15 +99,17 @@ export default function RolesPage() {
         {(role || selected === "new") && (
           <Card>
             <fieldset disabled={!canEdit} className="space-y-4">
-              {role?.isSystem && <p className="rounded bg-slate-50 px-3 py-2 text-xs text-slate-600">{t("roles.systemNote")}</p>}
+              {role?.name === SUPER_ADMIN
+                ? <p className="rounded bg-amber-50 px-3 py-2 text-xs text-amber-800">{t("roles.superNote")}</p>
+                : role?.isSystem && <p className="rounded bg-slate-50 px-3 py-2 text-xs text-slate-600">{t("roles.systemNote")}</p>}
               <div className="grid gap-3 sm:grid-cols-2">
                 <label className="block">
                   <span className="mb-1 block text-sm text-slate-600">{t("roles.name")}</span>
-                  <input className="input" disabled={role?.isSystem} value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value })} />
+                  <input className="input" dir="auto" disabled={role?.isSystem} value={role?.isSystem ? roleName(draft.name, lang) : draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value })} />
                 </label>
                 <label className="block">
                   <span className="mb-1 block text-sm text-slate-600">{t("roles.description")}</span>
-                  <input className="input" value={draft.description} onChange={(e) => setDraft({ ...draft, description: e.target.value })} />
+                  <input className="input" dir="auto" value={role?.isSystem ? roleDescription(draft.name, draft.description, lang) : draft.description} onChange={(e) => setDraft({ ...draft, description: e.target.value })} />
                 </label>
               </div>
 
@@ -119,7 +122,7 @@ export default function RolesPage() {
                       return (
                         <label key={p.code} className={clsx("flex cursor-pointer gap-2.5 rounded-md border p-2.5 text-sm",
                           on ? "border-brand-500 bg-brand-50" : "border-slate-200 hover:bg-slate-50")}>
-                          <input type="checkbox" className="mt-0.5" checked={on}
+                          <input type="checkbox" className="mt-0.5" checked={on} disabled={role?.name === SUPER_ADMIN}
                             onChange={(e) => setDraft({ ...draft, permissions: e.target.checked ? [...draft.permissions, p.code] : draft.permissions.filter((x) => x !== p.code) })} />
                           <span>
                             <span className="font-medium">{p[lang][0]}</span>
@@ -155,7 +158,7 @@ export default function RolesPage() {
             <thead>
               <tr className="border-b border-slate-100 text-xs text-slate-500">
                 <th className="py-2 text-start font-medium" />
-                {(roles.data ?? []).map((r) => <th key={r.id} className="px-2 py-2 text-center font-medium">{r.name}</th>)}
+                {(roles.data ?? []).map((r) => <th key={r.id} className="px-2 py-2 text-center font-medium">{roleName(r.name, lang)}</th>)}
               </tr>
             </thead>
             <tbody>

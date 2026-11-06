@@ -96,6 +96,9 @@ internal sealed class FakeMasterData(IEnumerable<Supplier> suppliers, IEnumerabl
 
     public Task<PurchaseOrder?> GetPurchaseOrderAsync(string poNumber, CancellationToken cancellationToken = default) =>
         Task.FromResult(_pos.FirstOrDefault(p => p.PoNumber == poNumber));
+
+    public Task<IReadOnlyList<PurchaseOrder>> ListOpenPurchaseOrdersAsync(string supplierId, CancellationToken cancellationToken = default) =>
+        Task.FromResult<IReadOnlyList<PurchaseOrder>>(_pos.Where(p => p.SupplierId == supplierId && p.Status == PurchaseOrderStatus.Open).ToList());
 }
 
 internal sealed class FakeHistory : IInvoiceHistory

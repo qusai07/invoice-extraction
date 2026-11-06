@@ -22,6 +22,35 @@ namespace InvoiceFlow.Infrastructure.Persistence.Migrations
 
             SqlServerModelBuilderExtensions.UseIdentityColumns(modelBuilder);
 
+            modelBuilder.Entity("InvoiceFlow.Infrastructure.Identity.RecoveryCodeRow", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("CodeHash")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .IsUnicode(false)
+                        .HasColumnType("varchar(64)");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("datetimeoffset");
+
+                    b.Property<DateTimeOffset?>("UsedAt")
+                        .HasColumnType("datetimeoffset");
+
+                    b.Property<Guid>("UserId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("UserId", "CodeHash")
+                        .IsUnique();
+
+                    b.ToTable("RecoveryCodes", (string)null);
+                });
+
             modelBuilder.Entity("InvoiceFlow.Infrastructure.Identity.RefreshTokenRow", b =>
                 {
                     b.Property<Guid>("Id")
@@ -230,6 +259,22 @@ namespace InvoiceFlow.Infrastructure.Persistence.Migrations
 
                     b.Property<DateTimeOffset?>("LockoutEndUtc")
                         .HasColumnType("datetimeoffset");
+
+                    b.Property<DateTimeOffset?>("MfaEnabledAt")
+                        .HasColumnType("datetimeoffset");
+
+                    b.Property<long?>("MfaLastTimeStep")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("MfaPendingSecret")
+                        .HasMaxLength(256)
+                        .IsUnicode(false)
+                        .HasColumnType("varchar(256)");
+
+                    b.Property<string>("MfaSecret")
+                        .HasMaxLength(256)
+                        .IsUnicode(false)
+                        .HasColumnType("varchar(256)");
 
                     b.Property<bool>("MustChangePassword")
                         .HasColumnType("bit");
@@ -564,6 +609,15 @@ namespace InvoiceFlow.Infrastructure.Persistence.Migrations
                     b.HasKey("Version");
 
                     b.ToTable("ValidationSettingsVersions", (string)null);
+                });
+
+            modelBuilder.Entity("InvoiceFlow.Infrastructure.Identity.RecoveryCodeRow", b =>
+                {
+                    b.HasOne("InvoiceFlow.Infrastructure.Identity.UserRow", null)
+                        .WithMany()
+                        .HasForeignKey("UserId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
                 });
 
             modelBuilder.Entity("InvoiceFlow.Infrastructure.Identity.RefreshTokenRow", b =>

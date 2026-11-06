@@ -16,7 +16,7 @@ interface SystemView {
 }
 
 export default function SystemPage() {
-  const { t, dateTime } = useI18n();
+  const { t, label, dateTime } = useI18n();
   const qc = useQueryClient();
   const q = useQuery({ queryKey: ["admin", "system"], queryFn: () => api<SystemView>("/admin/system"), refetchInterval: 10_000 });
   const [toast, setToast] = useState<{ message: string; kind: "info" | "error" } | null>(null);
@@ -53,8 +53,8 @@ export default function SystemPage() {
                 <tbody>
                   {d.jobs.map((j) => (
                     <tr key={`${j.step}-${j.status}`} className="border-t border-slate-100">
-                      <td className="py-1.5">{j.step}</td>
-                      <td className="py-1.5">{j.status}</td>
+                      <td className="py-1.5">{label("sys.step.", j.step)}</td>
+                      <td className="py-1.5">{label("sys.st.", j.status)}</td>
                       <td className="py-1.5 text-end tabular-nums">{j.count}</td>
                     </tr>
                   ))}
@@ -70,7 +70,7 @@ export default function SystemPage() {
                   {d.failed.map((f) => (
                     <li key={f.id} className="flex items-start gap-3 py-2 text-sm">
                       <div className="min-w-0 flex-1">
-                        <p className="font-medium">{f.fileName} · {f.step}</p>
+                        <p className="font-medium"><bdi dir="auto">{f.fileName}</bdi> · {label("sys.step.", f.step)}</p>
                         <p className="break-words text-xs text-red-700" dir="ltr">{f.lastError}</p>
                         <p className="text-xs text-slate-500">{dateTime(f.completedAt)}</p>
                       </div>

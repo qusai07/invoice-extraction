@@ -178,6 +178,38 @@ public class InvoiceEndpointTests(InvoiceFlowFactory factory)
         Assert.Contains("PO-004", item.ErrorCodes);
     }
 
+    [Fact]
+    public async Task Unread_invoice_can_be_read_again_but_a_read_one_cannot()
+    {
+        using var clerk = factory.Client("clara", "Clerk");
+
+        // The stand-in reader only knows dataset names, so a renamed copy "fails to read".
+        using var renamed = new MultipartFormDataContent
+        {
+            { new ByteArrayContent(await File.ReadAllBytesAsync(Path.Combine(DataDir, "syn-0035.pdf"))) { Headers = { ContentType = new("application/pdf") } }, "file", "scan-renamed.pdf" },
+        };
+        var upload = await clerk.PostAsync(U("/api/invoices"), renamed);
+        var unread = (await upload.Content.ReadFromJsonAsync<Submitted>(Json))!.Id;
+        var read = await UploadAsync(clerk, "syn-0016.png"); // price above PO → read fine, stops in review
+        await factory.DrainPipelineAsync();
+        Assert.Equal(InvoiceStatus.NeedsReview, (await GetAsync(clerk, unread)).Document.Status);
+
+        // Read again: goes back through the reader (fails again here) and returns to review, by clara's request.
+        Assert.Equal(HttpStatusCode.Accepted, (await clerk.PostAsync(U($"/api/invoices/{unread}/reread"), null)).StatusCode);
+        await factory.DrainPipelineAsync();
+        var d = await GetAsync(clerk, unread);
+        Assert.Equal(InvoiceStatus.NeedsReview, d.Document.Status);
+        Assert.Contains(d.Audit, a => a.Actor == "clara" && a.ToStatus == InvoiceStatus.Extracting);
+
+        // An invoice that was read successfully is corrected by hand, never re-read.
+        Assert.Equal(InvoiceStatus.NeedsReview, (await GetAsync(clerk, read)).Document.Status);
+        Assert.Equal(HttpStatusCode.Conflict, (await clerk.PostAsync(U($"/api/invoices/{read}/reread"), null)).StatusCode);
+
+        // Submitters can't trigger it.
+        using var submitter = factory.Client("sue", "Submitter");
+        Assert.Equal(HttpStatusCode.Forbidden, (await submitter.PostAsync(U($"/api/invoices/{unread}/reread"), null)).StatusCode);
+    }
+
     // ---------------- security ----------------
 
     [Fact]

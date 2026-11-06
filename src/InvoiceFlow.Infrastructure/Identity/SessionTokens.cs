@@ -23,6 +23,16 @@ public sealed class SessionOptions
     /// <summary>Signed out after this long, whatever the activity.</summary>
     public TimeSpan AbsoluteLifetime { get; set; } = TimeSpan.FromDays(14);
 
+    /// <summary>AES-256 key (32 bytes, base64) that encrypts authenticator secrets. Secret: Key Vault / user-secrets / env only.
+    /// Keep it stable: losing it means every user has to set up two-step sign-in again.</summary>
+    public string? MfaEncryptionKey { get; set; }
+
+    /// <summary>Anyone who can administer or approve must use two-step sign-in (ADR-0009). Local accounts only; SSO users get MFA from Entra.</summary>
+    public bool RequireMfaForPrivileged { get; set; } = true;
+
+    /// <summary>How long the "now enter your code" step stays open after a correct password.</summary>
+    public TimeSpan MfaChallengeLifetime { get; set; } = TimeSpan.FromMinutes(5);
+
     public int MaxFailedLogins { get; set; } = 5;
     public TimeSpan LockoutDuration { get; set; } = TimeSpan.FromMinutes(15);
 
@@ -94,6 +104,54 @@ public sealed class TokenIssuer(SessionOptions options, TimeProvider time)
             SigningCredentials = new SigningCredentials(options.Key(), SecurityAlgorithms.HmacSha256),
         });
         return (token, expires);
+    }
+
+    private const string MfaAudienceSuffix = ":mfa";
+
+    /// <summary>
+    /// Proof that the password step passed, valid for a few minutes, only accepted by the code step (own audience,
+    /// so it can never be used as an access token). Bound to the security stamp: a password change voids it.
+    /// </summary>
+    public string CreateMfaChallenge(UserRow user)
+    {
+        ArgumentNullException.ThrowIfNull(user);
+        var now = time.GetUtcNow();
+        return _handler.CreateToken(new SecurityTokenDescriptor
+        {
+            Issuer = options.Issuer,
+            Audience = options.Audience + MfaAudienceSuffix,
+            IssuedAt = now.UtcDateTime,
+            NotBefore = now.UtcDateTime,
+            Expires = (now + options.MfaChallengeLifetime).UtcDateTime,
+            Claims = new Dictionary<string, object>
+            {
+                [JwtRegisteredClaimNames.Sub] = user.Id.ToString(),
+                [SessionClaims.Stamp] = user.SecurityStamp,
+                [JwtRegisteredClaimNames.Jti] = Guid.NewGuid().ToString("N"),
+            },
+            SigningCredentials = new SigningCredentials(options.Key(), SecurityAlgorithms.HmacSha256),
+        });
+    }
+
+    public async Task<(Guid UserId, string Stamp)?> ReadMfaChallengeAsync(string? challenge)
+    {
+        if (string.IsNullOrWhiteSpace(challenge))
+        {
+            return null;
+        }
+
+        var parameters = ValidationParameters();
+        parameters.ValidAudience = options.Audience + MfaAudienceSuffix;
+        parameters.ClockSkew = TimeSpan.Zero;
+        var result = await _handler.ValidateTokenAsync(challenge, parameters).ConfigureAwait(false);
+        if (!result.IsValid ||
+            !result.Claims.TryGetValue(JwtRegisteredClaimNames.Sub, out var sub) || !Guid.TryParse(sub as string, out var id) ||
+            !result.Claims.TryGetValue(SessionClaims.Stamp, out var stampValue) || stampValue is not string stamp)
+        {
+            return null;
+        }
+
+        return (id, stamp);
     }
 
     public TokenValidationParameters ValidationParameters() => new()

@@ -3,10 +3,12 @@
 import { ArrowRight } from "lucide-react";
 import type { AuditEvent, Correction } from "@/lib/types";
 import { useI18n } from "@/lib/i18n";
+import { personLabel } from "@/lib/people";
 import { StatusBadge } from "./ui";
 
-export function History({ audit, corrections }: { audit: AuditEvent[]; corrections: Correction[] }) {
-  const { t, dateTime } = useI18n();
+export function History({ audit, corrections, people }: { audit: AuditEvent[]; corrections: Correction[]; people?: Record<string, string> | null }) {
+  const { t, label, dateTime } = useI18n();
+  const who = (id: string) => personLabel(id, people?.[id] ?? people?.[id.toLowerCase()], t);
 
   return (
     <div className="space-y-6">
@@ -25,7 +27,7 @@ export function History({ audit, corrections }: { audit: AuditEvent[]; correctio
                     <ArrowRight size={12} className="inline rtl:rotate-180" />{" "}
                     <span className="ltr-value text-emerald-700">{c.newValue ?? "∅"}</span>
                   </td>
-                  <td className="py-1 pe-2 text-slate-600">{c.userId}</td>
+                  <td className="py-1 pe-2 text-slate-600" dir="auto">{who(c.userId)}</td>
                   <td className="whitespace-nowrap py-1 text-xs text-slate-500">{dateTime(c.at)}</td>
                 </tr>
               ))}
@@ -41,7 +43,7 @@ export function History({ audit, corrections }: { audit: AuditEvent[]; correctio
             <li key={i} className="text-sm">
               <span className="absolute -start-1.5 mt-1.5 h-3 w-3 rounded-full border border-white bg-slate-300" />
               <div className="flex flex-wrap items-center gap-2">
-                <span className="font-medium">{e.actor}</span>
+                <span className="font-medium" dir="auto">{who(e.actor)}</span>
                 {e.toStatus ? (
                   <>
                     {e.fromStatus && <StatusBadge status={e.fromStatus} />}
@@ -49,11 +51,11 @@ export function History({ audit, corrections }: { audit: AuditEvent[]; correctio
                     <StatusBadge status={e.toStatus} />
                   </>
                 ) : (
-                  <span className="rounded bg-slate-100 px-1.5 text-xs">{e.action}</span>
+                  <span className="rounded bg-slate-100 px-1.5 text-xs">{label("evt.", e.action)}</span>
                 )}
                 <span className="text-xs text-slate-500">{dateTime(e.at)}</span>
               </div>
-              {e.details && <p className="mt-0.5 text-slate-600">{e.details}</p>}
+              {e.details && <p className="mt-0.5 text-slate-600" dir="auto">{e.details}</p>}
             </li>
           ))}
         </ol>

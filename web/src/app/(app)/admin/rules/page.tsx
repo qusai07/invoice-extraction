@@ -41,7 +41,7 @@ function toDraft(v: RulesView): Draft {
 }
 
 export default function RulesPage() {
-  const { t, lang, dateTime, money } = useI18n();
+  const { t, lang, label, dateTime, money } = useI18n();
   const { me } = useAuth();
   const canEdit = !!me?.permissions.includes("admin.rules");
   const qc = useQueryClient();
@@ -110,7 +110,7 @@ export default function RulesPage() {
           <Card title={t("rules.list")}>
             {byCategory.map(([category, rules]) => (
               <div key={category} className="mb-4 last:mb-0">
-                <h3 className="mb-1 text-xs font-semibold uppercase tracking-wide text-slate-400">{category}</h3>
+                <h3 className="mb-1 text-xs font-semibold uppercase tracking-wide text-slate-400">{label("rules.cat.", category)}</h3>
                 <ul className="divide-y divide-slate-100">
                   {rules.map((r) => {
                     const d = draft.rules[r.code]!;
@@ -157,7 +157,7 @@ export default function RulesPage() {
                 <div>
                   <p className="font-medium">{t("rules.version")} {v.version}</p>
                   <p className="text-xs text-slate-500">{dateTime(v.createdAt)} · {v.createdBy}</p>
-                  <p className="text-xs text-slate-700">{v.reason}</p>
+                  <p className="text-xs text-slate-700" dir="auto">{v.reason}</p>
                 </div>
               </li>
             ))}

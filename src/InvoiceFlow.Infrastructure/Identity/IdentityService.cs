@@ -14,7 +14,12 @@ public sealed record SessionResult(
 
 public sealed record CurrentUser(
     Guid Id, string Email, string DisplayName, IReadOnlyList<string> Roles, IReadOnlyList<string> Permissions,
-    decimal? ApprovalLimit, bool ApprovalUnlimited, bool MustChangePassword, string PreferredLanguage, string SecurityStamp, bool IsActive);
+    decimal? ApprovalLimit, bool ApprovalUnlimited, bool MustChangePassword, string PreferredLanguage, string SecurityStamp, bool IsActive,
+    bool MfaEnabled = false, bool MfaSetupRequired = false)
+{
+    /// <summary>Signed in, but limited to account pages until the password is changed / two-step sign-in is set up.</summary>
+    public bool Restricted => MustChangePassword || MfaSetupRequired;
+}
 
 public enum AuthError
 {
@@ -29,11 +34,17 @@ public enum AuthError
 
     WrongCurrentPassword,
     WeakPassword,
+
+    /// <summary>Wrong or reused authenticator/recovery code, or the code step expired.</summary>
+    WrongCode,
 }
 
-public sealed record AuthOutcome(SessionResult? Session, AuthError? Error, IReadOnlyList<string>? Problems = null)
+/// <param name="MfaChallenge">Password accepted; the code step is next (send this back with the code).</param>
+public sealed record AuthOutcome(SessionResult? Session, AuthError? Error, IReadOnlyList<string>? Problems = null, string? MfaChallenge = null)
 {
     public static AuthOutcome Ok(SessionResult s) => new(s, null);
+
+    public static AuthOutcome NeedsCode(string challenge) => new(null, null, null, challenge);
 
     public static AuthOutcome Fail(AuthError e, IReadOnlyList<string>? problems = null) => new(null, e, problems);
 }
@@ -44,6 +55,7 @@ public sealed class IdentityService(
     TokenIssuer tokens,
     SessionOptions options,
     PermissionResolver permissions,
+    MfaSecretProtector protector,
     TimeProvider time)
 {
     // Same cost for unknown emails as for real ones: response time doesn't reveal whether an account exists.
@@ -96,12 +108,183 @@ public sealed class IdentityService(
             user.PasswordHash = Hasher.HashPassword(user, password!);
         }
 
+        if (user.MfaSecret is not null)
+        {
+            // Password is right; the session starts only after the code. The failure counter stays until then.
+            await db.SaveChangesAsync(ct).ConfigureAwait(false);
+            return AuthOutcome.NeedsCode(tokens.CreateMfaChallenge(user));
+        }
+
         user.FailedLoginCount = 0;
         user.LockoutEndUtc = null;
         user.LastLoginAt = now;
         var session = await StartSessionAsync(user, Guid.NewGuid(), now + options.AbsoluteLifetime, client, ct).ConfigureAwait(false);
         await LogAsync("LoginSucceeded", user.Id, user.Email, client, null, ct).ConfigureAwait(false);
         return AuthOutcome.Ok(session);
+    }
+
+    /// <summary>Second sign-in step: the authenticator code (or a one-time recovery code). Wrong codes count toward lockout.</summary>
+    public async Task<AuthOutcome> LoginWithCodeAsync(string challenge, string code, ClientInfo client, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(client);
+        var now = time.GetUtcNow();
+        var proof = await tokens.ReadMfaChallengeAsync(challenge).ConfigureAwait(false);
+        var user = proof is { } p ? await db.Users.FirstOrDefaultAsync(u => u.Id == p.UserId, ct).ConfigureAwait(false) : null;
+        if (user is null || proof is null || user.SecurityStamp != proof.Value.Stamp || !user.IsActive || user.MfaSecret is null || user.LockoutEndUtc > now)
+        {
+            await LogAsync("MfaFailed", user?.Id, user?.Email, client, "code step expired or no longer valid", ct).ConfigureAwait(false);
+            return AuthOutcome.Fail(AuthError.WrongCode);
+        }
+
+        string? method = null;
+        if (RecoveryCodes.LooksLikeRecoveryCode(code))
+        {
+            var hash = RecoveryCodes.Hash(code);
+            var row = await db.RecoveryCodes.FirstOrDefaultAsync(r => r.UserId == user.Id && r.CodeHash == hash && r.UsedAt == null, ct).ConfigureAwait(false);
+            if (row is not null)
+            {
+                row.UsedAt = now;
+                method = "recovery code";
+            }
+        }
+        else if (Totp.Verify(protector.Unprotect(user.MfaSecret, user.Id), code, now, user.MfaLastTimeStep) is { } step)
+        {
+            user.MfaLastTimeStep = step;
+            method = "authenticator app";
+        }
+
+        if (method is null)
+        {
+            user.FailedLoginCount++;
+            if (user.FailedLoginCount >= options.MaxFailedLogins)
+            {
+                user.LockoutEndUtc = now + options.LockoutDuration;
+                user.FailedLoginCount = 0;
+                await LogAsync("LockedOut", user.Id, user.Email, client, $"{options.MaxFailedLogins} failed attempts", ct, save: false).ConfigureAwait(false);
+            }
+
+            await LogAsync("MfaFailed", user.Id, user.Email, client, "wrong code", ct).ConfigureAwait(false);
+            return AuthOutcome.Fail(AuthError.WrongCode);
+        }
+
+        user.FailedLoginCount = 0;
+        user.LockoutEndUtc = null;
+        user.LastLoginAt = now;
+        var session = await StartSessionAsync(user, Guid.NewGuid(), now + options.AbsoluteLifetime, client, ct).ConfigureAwait(false);
+        var left = method == "recovery code" ? await db.RecoveryCodes.CountAsync(r => r.UserId == user.Id && r.UsedAt == null, ct).ConfigureAwait(false) : -1;
+        await LogAsync("LoginSucceeded", user.Id, user.Email, client,
+            left >= 0 ? $"two-step: recovery code ({left} left)" : "two-step: authenticator app", ct).ConfigureAwait(false);
+        return AuthOutcome.Ok(session);
+    }
+
+    // ---------- two-step sign-in management (the signed-in user, for themselves) ----------
+
+    public sealed record MfaStatus(bool Enabled, bool Required, bool Available, int RecoveryCodesLeft, DateTimeOffset? EnabledAt);
+
+    public sealed record MfaSetup(string Secret, string OtpAuthUri);
+
+    public async Task<MfaStatus> MfaStatusAsync(Guid userId, CancellationToken ct = default)
+    {
+        var user = await db.Users.AsNoTracking().FirstAsync(u => u.Id == userId, ct).ConfigureAwait(false);
+        var current = await permissions.GetAsync(userId, ct).ConfigureAwait(false);
+        var left = await db.RecoveryCodes.CountAsync(r => r.UserId == userId && r.UsedAt == null, ct).ConfigureAwait(false);
+        return new MfaStatus(user.MfaSecret is not null, PermissionResolver.MfaRequiredFor(current?.Permissions ?? [], user, options, protector),
+            protector.IsConfigured && user.PasswordHash is not null, left, user.MfaEnabledAt);
+    }
+
+    /// <summary>Step 1: a new secret for the app (shown as a QR code). Nothing changes until <see cref="EnableMfaAsync"/>.</summary>
+    public async Task<MfaSetup> BeginMfaSetupAsync(Guid userId, CancellationToken ct = default)
+    {
+        var user = await db.Users.FirstAsync(u => u.Id == userId, ct).ConfigureAwait(false);
+        if (user.PasswordHash is null)
+        {
+            throw new InvalidOperationException("Accounts that sign in with Microsoft get two-step sign-in from Microsoft.");
+        }
+
+        var secret = Totp.NewSecret();
+        user.MfaPendingSecret = protector.Protect(secret, user.Id);
+        await db.SaveChangesAsync(ct).ConfigureAwait(false);
+        return new MfaSetup(Base32.Encode(secret), Totp.OtpAuthUri("InvoiceFlow", user.Email, secret));
+    }
+
+    /// <summary>Step 2: the first code proves the app works. Turns it on and returns the recovery codes (shown once).</summary>
+    public async Task<IReadOnlyList<string>?> EnableMfaAsync(Guid userId, string code, ClientInfo client, CancellationToken ct = default)
+    {
+        var user = await db.Users.FirstAsync(u => u.Id == userId, ct).ConfigureAwait(false);
+        if (user.MfaPendingSecret is null)
+        {
+            return null;
+        }
+
+        var now = time.GetUtcNow();
+        var step = Totp.Verify(protector.Unprotect(user.MfaPendingSecret, user.Id), code, now, null);
+        if (step is null)
+        {
+            await LogAsync("MfaFailed", user.Id, user.Email, client, "wrong code during setup", ct).ConfigureAwait(false);
+            return null;
+        }
+
+        user.MfaSecret = user.MfaPendingSecret;
+        user.MfaPendingSecret = null;
+        user.MfaEnabledAt = now;
+        user.MfaLastTimeStep = step;
+        var codes = await ReplaceRecoveryCodesAsync(user.Id, now, ct).ConfigureAwait(false);
+        await LogAsync("MfaEnabled", user.Id, user.Email, client, null, ct).ConfigureAwait(false);
+        permissions.Invalidate(user.Id); // lifts the "set up two-step sign-in first" restriction
+        return codes;
+    }
+
+    /// <summary>New recovery codes (old ones stop working). Needs a current code from the app.</summary>
+    public async Task<IReadOnlyList<string>?> NewRecoveryCodesAsync(Guid userId, string code, ClientInfo client, CancellationToken ct = default)
+    {
+        var user = await db.Users.FirstAsync(u => u.Id == userId, ct).ConfigureAwait(false);
+        if (!await CheckAppCodeAsync(user, code, client, ct).ConfigureAwait(false))
+        {
+            return null;
+        }
+
+        var codes = await ReplaceRecoveryCodesAsync(user.Id, time.GetUtcNow(), ct).ConfigureAwait(false);
+        await LogAsync("MfaRecoveryCodesRenewed", user.Id, user.Email, client, null, ct).ConfigureAwait(false);
+        return codes;
+    }
+
+    /// <summary>Turns two-step sign-in off (not allowed while it is required for this user). Needs the password and a code.</summary>
+    public async Task<bool> DisableMfaAsync(Guid userId, string password, string code, ClientInfo client, CancellationToken ct = default)
+    {
+        var user = await db.Users.FirstAsync(u => u.Id == userId, ct).ConfigureAwait(false);
+        if (user.PasswordHash is null || Hasher.VerifyHashedPassword(user, user.PasswordHash, password ?? "") == PasswordVerificationResult.Failed ||
+            !await CheckAppCodeAsync(user, code, client, ct).ConfigureAwait(false))
+        {
+            return false;
+        }
+
+        user.MfaSecret = null;
+        user.MfaPendingSecret = null;
+        user.MfaEnabledAt = null;
+        await db.RecoveryCodes.Where(r => r.UserId == userId).ExecuteDeleteAsync(ct).ConfigureAwait(false);
+        await LogAsync("MfaDisabled", user.Id, user.Email, client, "by the user", ct).ConfigureAwait(false);
+        permissions.Invalidate(user.Id);
+        return true;
+    }
+
+    private async Task<bool> CheckAppCodeAsync(UserRow user, string code, ClientInfo client, CancellationToken ct)
+    {
+        if (user.MfaSecret is not null && Totp.Verify(protector.Unprotect(user.MfaSecret, user.Id), code, time.GetUtcNow(), user.MfaLastTimeStep) is { } step)
+        {
+            user.MfaLastTimeStep = step;
+            return true;
+        }
+
+        await LogAsync("MfaFailed", user.Id, user.Email, client, "wrong code", ct).ConfigureAwait(false);
+        return false;
+    }
+
+    private async Task<IReadOnlyList<string>> ReplaceRecoveryCodesAsync(Guid userId, DateTimeOffset now, CancellationToken ct)
+    {
+        await db.RecoveryCodes.Where(r => r.UserId == userId).ExecuteDeleteAsync(ct).ConfigureAwait(false);
+        var codes = RecoveryCodes.Generate();
+        db.RecoveryCodes.AddRange(codes.Select(c => new RecoveryCodeRow { Id = Guid.NewGuid(), UserId = userId, CodeHash = RecoveryCodes.Hash(c), CreatedAt = now }));
+        return codes;
     }
 
     /// <summary>Rotates the refresh token. A token used twice means it was stolen: the whole sign-in is ended.</summary>
@@ -276,8 +459,18 @@ public sealed class IdentityService(
 /// Who a user is right now: active?, stamp, roles, permissions. Cached for a few seconds so every API call can check it
 /// cheaply: deactivation, role changes and logout-everywhere take effect within <see cref="CacheFor"/>.
 /// </summary>
-public sealed class PermissionResolver(IServiceScopeFactory scopes, IMemoryCache cache)
+public sealed class PermissionResolver(IServiceScopeFactory scopes, IMemoryCache cache, SessionOptions options, MfaSecretProtector protector)
 {
+    /// <summary>Two-step sign-in is mandatory for local accounts that can administer or approve (and only once it can be configured).</summary>
+    public static bool MfaRequiredFor(IEnumerable<string> userPermissions, UserRow user, SessionOptions options, MfaSecretProtector protector)
+    {
+        ArgumentNullException.ThrowIfNull(user);
+        ArgumentNullException.ThrowIfNull(options);
+        ArgumentNullException.ThrowIfNull(protector);
+        return options.RequireMfaForPrivileged && protector.IsConfigured && user.PasswordHash is not null &&
+               userPermissions.Any(Application.Identity.Permissions.Privileged.Contains);
+    }
+
     public static readonly TimeSpan CacheFor = TimeSpan.FromSeconds(15);
 
     public async Task<CurrentUser?> GetAsync(Guid userId, CancellationToken ct = default)
@@ -300,11 +493,14 @@ public sealed class PermissionResolver(IServiceScopeFactory scopes, IMemoryCache
             .Select(r => new { r.Name, Permissions = r.Permissions.Select(p => p.Permission) })
             .ToListAsync(ct).ConfigureAwait(false);
 
+        var perms = roles.SelectMany(r => r.Permissions).Distinct().Order(StringComparer.Ordinal).ToList();
         var current = new CurrentUser(
             user.Id, user.Email, user.DisplayName,
             roles.Select(r => r.Name).Order(StringComparer.Ordinal).ToList(),
-            roles.SelectMany(r => r.Permissions).Distinct().Order(StringComparer.Ordinal).ToList(),
-            user.ApprovalLimit, user.ApprovalUnlimited, user.MustChangePassword, user.PreferredLanguage, user.SecurityStamp, user.IsActive);
+            perms,
+            user.ApprovalLimit, user.ApprovalUnlimited, user.MustChangePassword, user.PreferredLanguage, user.SecurityStamp, user.IsActive,
+            MfaEnabled: user.MfaSecret is not null,
+            MfaSetupRequired: user.MfaSecret is null && MfaRequiredFor(perms, user, options, protector));
 
         cache.Set(Key(userId), current, CacheFor);
         return current;

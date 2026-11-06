@@ -22,7 +22,19 @@ public static class AuthEndpoints
 
     public sealed record MeResponse(
         string Id, string? Email, string Name, IReadOnlyCollection<string> Roles, IReadOnlyCollection<string> Permissions,
-        decimal ApprovalThreshold, decimal? ApprovalLimit, bool ApprovalUnlimited, bool MustChangePassword, string Language);
+        decimal ApprovalThreshold, decimal? ApprovalLimit, bool ApprovalUnlimited, bool MustChangePassword, string Language,
+        bool MfaEnabled = false, bool MfaSetupRequired = false);
+
+    /// <summary>Password accepted; send <see cref="Challenge"/> with the code to /api/auth/login/code.</summary>
+    public sealed record CodeStepResponse(bool CodeRequired, string Challenge);
+
+    public sealed record CodeLoginRequest(string Challenge, string Code);
+
+    public sealed record CodeRequest(string Code);
+
+    public sealed record DisableMfaRequest(string Password, string Code);
+
+    public sealed record RecoveryCodesResponse(IReadOnlyList<string> RecoveryCodes);
 
     public sealed record SessionResponse(string AccessToken, DateTimeOffset ExpiresAt, MeResponse User);
 
@@ -42,11 +54,90 @@ public static class AuthEndpoints
         g.MapPost("/login", async Task<IResult> (LoginRequest body, HttpContext http, IdentityService identity, IOptions<ValidationSettings> settings, CancellationToken ct) =>
             {
                 var outcome = await identity.LoginAsync(body.Email ?? "", body.Password ?? "", Client(http), ct);
-                return outcome.Session is { } s
-                    ? Issue(http, s, settings.Value)
-                    : TypedResults.Problem(SignInFailedMessage, statusCode: StatusCodes.Status401Unauthorized);
+                return outcome switch
+                {
+                    { Session: { } s } => Issue(http, s, settings.Value),
+                    { MfaChallenge: { } c } => TypedResults.Ok(new CodeStepResponse(true, c)),
+                    _ => TypedResults.Problem(SignInFailedMessage, statusCode: StatusCodes.Status401Unauthorized),
+                };
             })
             .AllowAnonymous().RequireRateLimiting(LoginRateLimit).DisableAntiforgery();
+
+        // Second step: the 6-digit code from the authenticator app, or a one-time recovery code.
+        g.MapPost("/login/code", async Task<IResult> (CodeLoginRequest body, HttpContext http, IdentityService identity, IOptions<ValidationSettings> settings, CancellationToken ct) =>
+            {
+                var outcome = await identity.LoginWithCodeAsync(body.Challenge ?? "", body.Code ?? "", Client(http), ct);
+                return outcome.Session is { } s
+                    ? Issue(http, s, settings.Value)
+                    : TypedResults.Problem("That code didn't work. Check the code in your app (it changes every 30 seconds) and try again.",
+                        statusCode: StatusCodes.Status401Unauthorized);
+            })
+            .AllowAnonymous().RequireRateLimiting(LoginRateLimit).DisableAntiforgery();
+
+        // ---- two-step sign-in, for the signed-in user (allowed while restricted, so required setup can happen) ----
+        var mfa = g.MapGroup("/mfa");
+        mfa.MapGet("/", async Task<IResult> (ClaimsPrincipal user, IdentityService identity, CancellationToken ct) =>
+            UserId(user) is { } id ? TypedResults.Ok(await identity.MfaStatusAsync(id, ct)) : LocalOnly());
+
+        mfa.MapPost("/setup", async Task<IResult> (ClaimsPrincipal user, IdentityService identity, MfaSecretProtector protector, CancellationToken ct) =>
+            {
+                if (UserId(user) is not { } id)
+                {
+                    return LocalOnly();
+                }
+
+                if (!protector.IsConfigured)
+                {
+                    return TypedResults.Problem($"Two-step sign-in isn't set up on this server yet (missing {InvoiceFlow.Infrastructure.Identity.SessionOptions.SectionName}:MfaEncryptionKey). Ask an administrator.",
+                        statusCode: StatusCodes.Status503ServiceUnavailable);
+                }
+
+                if ((await identity.MfaStatusAsync(id, ct)).Enabled)
+                {
+                    return TypedResults.Problem("Two-step sign-in is already on. Turn it off first to move to a new phone.", statusCode: StatusCodes.Status409Conflict);
+                }
+
+                return TypedResults.Ok(await identity.BeginMfaSetupAsync(id, ct));
+            }).DisableAntiforgery();
+
+        mfa.MapPost("/enable", async Task<IResult> (CodeRequest body, ClaimsPrincipal user, HttpContext http, IdentityService identity, CancellationToken ct) =>
+            {
+                if (UserId(user) is not { } id)
+                {
+                    return LocalOnly();
+                }
+
+                var codes = await identity.EnableMfaAsync(id, body.Code ?? "", Client(http), ct);
+                return codes is null ? WrongCode() : TypedResults.Ok(new RecoveryCodesResponse(codes));
+            }).RequireRateLimiting(LoginRateLimit).DisableAntiforgery();
+
+        mfa.MapPost("/recovery-codes", async Task<IResult> (CodeRequest body, ClaimsPrincipal user, HttpContext http, IdentityService identity, CancellationToken ct) =>
+            {
+                if (UserId(user) is not { } id)
+                {
+                    return LocalOnly();
+                }
+
+                var codes = await identity.NewRecoveryCodesAsync(id, body.Code ?? "", Client(http), ct);
+                return codes is null ? WrongCode() : TypedResults.Ok(new RecoveryCodesResponse(codes));
+            }).RequireRateLimiting(LoginRateLimit).DisableAntiforgery();
+
+        mfa.MapPost("/disable", async Task<IResult> (DisableMfaRequest body, ClaimsPrincipal user, HttpContext http, IdentityService identity, CancellationToken ct) =>
+            {
+                if (UserId(user) is not { } id)
+                {
+                    return LocalOnly();
+                }
+
+                if ((await identity.MfaStatusAsync(id, ct)).Required)
+                {
+                    return TypedResults.Problem("Two-step sign-in is required for your role, so it can't be turned off.", statusCode: StatusCodes.Status403Forbidden);
+                }
+
+                return await identity.DisableMfaAsync(id, body.Password ?? "", body.Code ?? "", Client(http), ct)
+                    ? TypedResults.NoContent()
+                    : TypedResults.Problem("The password or the code is not correct.", statusCode: StatusCodes.Status400BadRequest);
+            }).RequireRateLimiting(LoginRateLimit).DisableAntiforgery();
 
         g.MapPost("/refresh", async Task<IResult> (HttpContext http, IdentityService identity, IOptions<ValidationSettings> settings, CancellationToken ct) =>
             {
@@ -134,8 +225,9 @@ public static class AuthEndpoints
     }
 
     public static MeResponse ToMe(CurrentUser u, ValidationSettings settings) =>
-        new(u.Id.ToString(), u.Email, u.DisplayName, u.Roles, u.MustChangePassword ? [] : u.Permissions,
-            settings.ApprovalThreshold, u.ApprovalLimit, u.ApprovalUnlimited, u.MustChangePassword, u.PreferredLanguage);
+        new(u.Id.ToString(), u.Email, u.DisplayName, u.Roles, u.Restricted ? [] : u.Permissions,
+            settings.ApprovalThreshold, u.ApprovalLimit, u.ApprovalUnlimited, u.MustChangePassword, u.PreferredLanguage,
+            u.MfaEnabled, u.MfaSetupRequired && !u.MustChangePassword);
 
     private static IResult Issue(HttpContext http, SessionResult s, ValidationSettings settings)
     {
@@ -150,6 +242,15 @@ public static class AuthEndpoints
         });
         return TypedResults.Ok(new SessionResponse(s.AccessToken, s.AccessExpiresAt, ToMe(s.User, settings)));
     }
+
+    private static Guid? UserId(ClaimsPrincipal user) => Guid.TryParse(user.FindFirstValue("sub"), out var id) ? id : null;
+
+    private static IResult LocalOnly() =>
+        TypedResults.Problem("Only available for signed-in accounts.", statusCode: StatusCodes.Status400BadRequest);
+
+    private static IResult WrongCode() =>
+        TypedResults.Problem("That code didn't work. Check the code in your app (it changes every 30 seconds) and try again.",
+            statusCode: StatusCodes.Status400BadRequest);
 
     private static void ClearCookie(HttpContext http) =>
         http.Response.Cookies.Delete(RefreshCookie, new CookieOptions { Path = "/api/auth", Secure = true, SameSite = SameSiteMode.Strict });

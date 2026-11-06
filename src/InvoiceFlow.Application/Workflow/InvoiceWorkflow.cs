@@ -382,6 +382,31 @@ public sealed partial class InvoiceWorkflow(
         await store.SaveAsync(c, ct).ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// Reads the file again. Only for invoices in review whose first read produced no data: the reader wasn't configured
+    /// at the time, or it failed. A successful read is never redone; the reviewer corrects it instead.
+    /// </summary>
+    public async Task RereadAsync(Guid id, UserContext user, CancellationToken ct = default)
+    {
+        if (extractor is null)
+        {
+            throw new WorkflowException(WorkflowErrorKind.Unavailable,
+                "No invoice reader is configured, so the file can't be read automatically. Enter the data by hand, or ask an administrator to set up the reader.");
+        }
+
+        var c = await LoadAsync(id, ct).ConfigureAwait(false);
+        RequireStatus(c, InvoiceStatus.NeedsReview);
+        if (c.Extraction is { Status: not ExtractionStatus.Failed })
+        {
+            throw new WorkflowException(WorkflowErrorKind.InvalidState, "This invoice was already read. Correct the data in the form instead.");
+        }
+
+        CountAction("reread");
+        c.Document.TransitionTo(InvoiceStatus.Extracting, user.Id, Now, "Read again on request.");
+        c.JobsToEnqueue.Add(PipelineStep.Extract);
+        await store.SaveAsync(c, ct).ConfigureAwait(false);
+    }
+
     public async Task RetryPostingAsync(Guid id, UserContext user, CancellationToken ct = default)
     {
         var c = await LoadAsync(id, ct).ConfigureAwait(false);

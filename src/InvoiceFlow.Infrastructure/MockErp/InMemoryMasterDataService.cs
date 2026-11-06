@@ -25,6 +25,10 @@ public sealed class InMemoryMasterDataService(MasterDataFile data) : IMasterData
     public Task<PurchaseOrder?> GetPurchaseOrderAsync(string poNumber, CancellationToken cancellationToken = default) =>
         Task.FromResult(_pos.GetValueOrDefault(Key(poNumber)));
 
+    public Task<IReadOnlyList<PurchaseOrder>> ListOpenPurchaseOrdersAsync(string supplierId, CancellationToken cancellationToken = default) =>
+        Task.FromResult<IReadOnlyList<PurchaseOrder>>(Data.PurchaseOrders
+            .Where(p => p.SupplierId == supplierId && p.Status == PurchaseOrderStatus.Open).ToList());
+
     // PO numbers are compared ignoring case, spaces and punctuation: "LPO/2026/0331" == "lpo 2026 0331".
     private static string Key(string poNumber) =>
         new(poNumber.Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());

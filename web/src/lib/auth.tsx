@@ -113,7 +113,9 @@ interface AuthState {
   me: Me | null;
   loading: boolean;
   can: (p: Permission) => boolean;
-  login: (email: string, password: string) => Promise<void>;
+  /** Resolves with a challenge when the account uses two-step sign-in; then call loginWithCode. */
+  login: (email: string, password: string) => Promise<{ challenge: string } | void>;
+  loginWithCode: (challenge: string, code: string) => Promise<void>;
   signInDev: (u: DevUser) => void;
   changePassword: (current: string, next: string) => Promise<void>;
   signOut: () => Promise<void>;
@@ -198,6 +200,23 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         throw new AuthFailure("network", [], 0);
       }
       if (!r.ok) throw await problem(r);
+      const body = (await r.json()) as SessionResponse | { codeRequired: true; challenge: string };
+      if ("codeRequired" in body) return { challenge: body.challenge };
+      accept(body);
+    },
+    loginWithCode: async (challenge, code) => {
+      let r: Response;
+      try {
+        r = await fetch("/api/auth/login/code", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          credentials: "same-origin",
+          body: JSON.stringify({ challenge, code }),
+        });
+      } catch {
+        throw new AuthFailure("network", [], 0);
+      }
+      if (!r.ok) throw await problem(r);
       accept((await r.json()) as SessionResponse);
     },
     changePassword: async (current, next) => {
@@ -222,6 +241,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }), [me, loading, can]);
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
+}
+
+/** Where a signed-in user must go first: change a temporary password, then set up two-step sign-in if required. */
+export function requiredAccountStep(me: Me, next: string): string | null {
+  if (me.mustChangePassword) return `/account/password?next=${encodeURIComponent(next)}`;
+  if (me.mfaSetupRequired) return `/account/security?next=${encodeURIComponent(next)}`;
+  return null;
 }
 
 export function useAuth(): AuthState {

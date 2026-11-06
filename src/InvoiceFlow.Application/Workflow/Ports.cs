@@ -44,7 +44,8 @@ public sealed record InvoiceSummary(
     DateOnly? InvoiceDate,
     string? Currency,
     decimal? Total,
-    IReadOnlyList<string> ErrorCodes);
+    IReadOnlyList<string> ErrorCodes,
+    string? SubmittedByName = null);
 
 public sealed record InvoiceQuery(InvoiceStatus? Status = null, string? SubmittedBy = null, int Skip = 0, int Take = 50);
 
@@ -54,7 +55,12 @@ public sealed record InvoiceDetails(
     ExtractionResult? Extraction,
     ValidationReport? Validation,
     IReadOnlyList<FieldCorrection> Corrections,
-    IReadOnlyList<AuditEvent> Audit);
+    IReadOnlyList<AuditEvent> Audit,
+    DuplicateInfo? DuplicateOf = null,
+    IReadOnlyDictionary<string, string>? People = null);
+
+/// <summary>For a duplicate: the earlier document it repeats. Reason "file" = same file (DUP-001); "number" = same supplier + invoice number (DUP-002).</summary>
+public sealed record DuplicateInfo(Guid Id, string FileName, DateTimeOffset ReceivedAt, InvoiceStatus Status, string Reason);
 
 /// <summary>Persistence for invoice cases (implemented with EF Core / SQL Server).</summary>
 public interface IInvoiceStore

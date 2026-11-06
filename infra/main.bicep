@@ -1,6 +1,8 @@
 // InvoiceFlow on Azure — one resource group, UAE North by default (data residency).
 //
-//   az deployment group create -g rg-invoiceflow -f infra/main.bicep -p infra/main.parameters.json
+//   az deployment group create -g rg-invoiceflow -f infra/main.bicep -p infra/main.parameters.json \
+//     -p sessionSigningKey=<base64 32 bytes> mfaEncryptionKey=<base64 32 bytes>
+//   (generate each with: openssl rand -base64 32; store them in your secret store, they are needed for redeploys)
 //
 // Identity model: ONE user-assigned managed identity for API + worker. No keys or passwords anywhere:
 //   SQL (Entra-only auth), Blob (RBAC), Azure OpenAI (RBAC, local auth disabled), ACR pull (RBAC).
@@ -23,8 +25,13 @@ param tenantId string = subscription().tenantId
 param sqlAdminGroupName string
 param sqlAdminGroupObjectId string
 
-@description('API app registration: audience accepted by the API (e.g. api://<client-id>).')
-param apiAudience string
+@description('Signs session tokens: 32+ random bytes, base64. Pass at deploy time (never in the parameters file); rotating it signs everyone out.')
+@secure()
+param sessionSigningKey string
+
+@description('Encrypts users\' two-step sign-in secrets: exactly 32 random bytes, base64. Pass at deploy time; keep it stable (losing it means every user sets up two-step sign-in again).')
+@secure()
+param mfaEncryptionKey string
 
 @description('Container images, e.g. <acr>.azurecr.io/invoiceflow-api:1.0.0. Build and push before deploying the apps.')
 param apiImage string
@@ -305,6 +312,10 @@ resource api 'Microsoft.App/containerApps@2024-03-01' = {
       // Internal only: reached by the web app through the environment, never from the internet.
       ingress: { external: false, targetPort: 8080, transport: 'http', allowInsecure: true }
       registries: registries
+      secrets: [
+        { name: 'session-signing-key', value: sessionSigningKey }
+        { name: 'mfa-encryption-key', value: mfaEncryptionKey }
+      ]
     }
     template: {
       containers: [
@@ -314,9 +325,10 @@ resource api 'Microsoft.App/containerApps@2024-03-01' = {
           resources: { cpu: json('0.5'), memory: '1Gi' }
           env: concat(commonEnv, [
             { name: 'ASPNETCORE_ENVIRONMENT', value: 'Production' }
-            { name: 'Auth__Mode', value: 'EntraId' }
-            { name: 'Auth__EntraId__TenantId', value: tenantId }
-            { name: 'Auth__EntraId__Audience', value: apiAudience }
+            // InvoiceFlow's own sign-in (ADR-0009); keys come from Container Apps secrets, never plain env values.
+            { name: 'Auth__Mode', value: 'Session' }
+            { name: 'Auth__Session__SigningKey', secretRef: 'session-signing-key' }
+            { name: 'Auth__Session__MfaEncryptionKey', secretRef: 'mfa-encryption-key' }
             { name: 'Database__MigrateOnStartup', value: 'true' }
             { name: 'ForwardedHeaders__Enabled', value: 'true' }
           ])

@@ -47,9 +47,16 @@ public static class BuiltInRoles
     public const string Auditor = "Auditor";
     public const string SystemAdmin = "SystemAdmin";
 
+    /// <summary>
+    /// Every permission, always (re-synced at start, so new permissions are included). Locked: its permissions can't be
+    /// edited, and only a super admin can grant it or manage a super admin's account. The bootstrap admin gets it.
+    /// </summary>
+    public const string SuperAdmin = "SuperAdmin";
+
     public static readonly IReadOnlyDictionary<string, (string Description, string[] Permissions)> Defaults =
         new Dictionary<string, (string, string[])>(StringComparer.Ordinal)
         {
+            [SuperAdmin] = ("Full access: every permission, including ones added later. Locked.", [.. Permissions.All]),
             [Submitter] = ("Uploads invoices and follows their status.",
                 [Permissions.InvoiceReadOwn, Permissions.InvoiceSubmit]),
             [Clerk] = ("Accounts-payable clerk: reviews and corrects exceptions.",

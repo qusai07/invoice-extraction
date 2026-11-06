@@ -2,8 +2,8 @@
 
 import { Suspense, useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Eye, EyeOff, Loader2, LogIn } from "lucide-react";
-import { AUTH_MODE, AuthFailure, DEMO_USERS, useAuth } from "@/lib/auth";
+import { Eye, EyeOff, Loader2, LogIn, ShieldCheck } from "lucide-react";
+import { AUTH_MODE, AuthFailure, DEMO_USERS, requiredAccountStep, useAuth } from "@/lib/auth";
 import { useI18n } from "@/lib/i18n";
 
 function safeNext(next: string | null): string {
@@ -13,7 +13,7 @@ function safeNext(next: string | null): string {
 
 function LoginInner() {
   const { t, toggle } = useI18n();
-  const { me, signInDev, login } = useAuth();
+  const { me, signInDev, login, loginWithCode } = useAuth();
   const router = useRouter();
   const params = useSearchParams();
   const next = safeNext(params.get("next"));
@@ -34,15 +34,41 @@ function LoginInner() {
   }, [params, signInDev]);
 
   useEffect(() => {
-    if (me) router.replace(me.mustChangePassword ? `/account/password?next=${encodeURIComponent(next)}` : next);
+    if (me) router.replace(requiredAccountStep(me, next) ?? next);
   }, [me, next, router]);
+
+  // Second step (two-step sign-in): the password was right; now the code from the app or a recovery code.
+  const [challenge, setChallenge] = useState<string | null>(null);
+  const [code, setCode] = useState("");
+  const [useRecovery, setUseRecovery] = useState(false);
+  const [codeError, setCodeError] = useState<"wrong" | "tooMany" | "server" | null>(null);
+
+  async function submitCode(e: React.FormEvent) {
+    e.preventDefault();
+    if (!challenge) return;
+    setBusy(true);
+    setCodeError(null);
+    try {
+      await loginWithCode(challenge, code);
+    } catch (err) {
+      const status = err instanceof AuthFailure ? err.status : 0;
+      setCodeError(status === 401 ? "wrong" : status === 429 ? "tooMany" : "server");
+      setCode("");
+    } finally {
+      setBusy(false);
+    }
+  }
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     setBusy(true);
     setError(null);
     try {
-      await login(email.trim(), password);
+      const step = await login(email.trim(), password);
+      if (step) {
+        setChallenge(step.challenge);
+        setPassword("");
+      }
     } catch (err) {
       const status = err instanceof AuthFailure ? err.status : 0;
       // Only a real "wrong credentials" answer clears the password; a server problem keeps it so the user can retry.
@@ -65,7 +91,41 @@ function LoginInner() {
           <button className="text-sm text-slate-500 hover:text-slate-800" onClick={toggle}>{t("common.language")}</button>
         </div>
 
-        {AUTH_MODE === "session" ? (
+        {AUTH_MODE === "session" && challenge ? (
+          <form onSubmit={submitCode} className="space-y-3" noValidate>
+            <h2 className="flex items-center gap-2 font-medium"><ShieldCheck size={18} className="text-brand-600" /> {t("mfa.login.title")}</h2>
+            <p className="text-sm text-slate-600">{useRecovery ? t("mfa.login.recoveryHint") : t("mfa.login.hint")}</p>
+            <label className="block">
+              <span className="mb-1 block text-sm text-slate-600">{useRecovery ? t("mfa.login.recoveryCode") : t("mfa.login.code")}</span>
+              {useRecovery ? (
+                <input className="input font-mono tracking-wider" dir="ltr" autoComplete="off" autoFocus key="recovery"
+                  placeholder="xxxxx-xxxxx" value={code} onChange={(e) => setCode(e.target.value)} />
+              ) : (
+                <input className="input text-center font-mono text-lg tracking-[0.4em]" dir="ltr" inputMode="numeric" autoComplete="one-time-code"
+                  autoFocus key="app" maxLength={7} placeholder="123456" value={code}
+                  onChange={(e) => setCode(e.target.value.replace(/[^\d ]/g, ""))} />
+              )}
+            </label>
+            {codeError && (
+              <p role="alert" data-testid="code-error" className={codeError === "server"
+                ? "rounded bg-amber-50 px-3 py-2 text-sm text-amber-800" : "rounded bg-red-50 px-3 py-2 text-sm text-red-700"}>
+                {t(codeError === "wrong" ? "mfa.login.wrong" : codeError === "tooMany" ? "auth.tooMany" : "auth.unavailable")}
+              </p>
+            )}
+            <button type="submit" className="btn-primary w-full justify-center"
+              disabled={busy || (useRecovery ? code.replace(/[^a-z0-9]/gi, "").length !== 10 : code.replace(/\D/g, "").length !== 6)}>
+              {busy ? <Loader2 size={16} className="animate-spin" /> : <LogIn size={16} />} {t("mfa.login.verify")}
+            </button>
+            <div className="flex justify-between text-xs">
+              <button type="button" className="text-brand-600 hover:underline" onClick={() => { setUseRecovery((v) => !v); setCode(""); setCodeError(null); }}>
+                {useRecovery ? t("mfa.login.useApp") : t("mfa.login.useRecovery")}
+              </button>
+              <button type="button" className="text-slate-500 hover:underline" onClick={() => { setChallenge(null); setCode(""); setCodeError(null); }}>
+                {t("mfa.login.restart")}
+              </button>
+            </div>
+          </form>
+        ) : AUTH_MODE === "session" ? (
           <form onSubmit={submit} className="space-y-3" noValidate>
             <h2 className="font-medium">{t("auth.title")}</h2>
             <label className="block">

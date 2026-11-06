@@ -35,9 +35,13 @@ public class PasswordPolicyTests
         Assert.All(BuiltInRoles.Defaults.Values.SelectMany(r => r.Permissions), p => Assert.True(Permissions.IsKnown(p), p));
 
     [Fact]
-    public void Only_SystemAdmin_can_administer_by_default() =>
-        Assert.Equal([BuiltInRoles.SystemAdmin],
-            BuiltInRoles.Defaults.Where(r => r.Value.Permissions.Contains(Permissions.AdminUsers)).Select(r => r.Key));
+    public void Only_the_admin_roles_can_administer_by_default() =>
+        Assert.Equal([BuiltInRoles.SuperAdmin, BuiltInRoles.SystemAdmin],
+            BuiltInRoles.Defaults.Where(r => r.Value.Permissions.Contains(Permissions.AdminUsers)).Select(r => r.Key).Order(StringComparer.Ordinal));
+
+    [Fact]
+    public void Super_admin_has_every_permission() =>
+        Assert.Equal(Permissions.All.Order(StringComparer.Ordinal), BuiltInRoles.Defaults[BuiltInRoles.SuperAdmin].Permissions.Order(StringComparer.Ordinal));
 
     [Fact]
     public void Disabled_rule_is_removed_and_locked_rules_ignore_overrides()

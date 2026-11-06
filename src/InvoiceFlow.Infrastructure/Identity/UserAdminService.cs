@@ -13,7 +13,8 @@ public sealed record RoleRef(Guid Id, string Name);
 
 public sealed record UserSummary(
     Guid Id, string Email, string DisplayName, bool IsActive, IReadOnlyList<RoleRef> Roles, decimal? ApprovalLimit, bool ApprovalUnlimited,
-    DateTimeOffset? LastLoginAt, DateTimeOffset? LockedUntil, bool MustChangePassword, DateTimeOffset CreatedAt, bool HasPassword);
+    DateTimeOffset? LastLoginAt, DateTimeOffset? LockedUntil, bool MustChangePassword, DateTimeOffset CreatedAt, bool HasPassword,
+    bool MfaEnabled = false);
 
 public sealed record SaveUser(string Email, string DisplayName, IReadOnlyList<Guid> RoleIds, decimal? ApprovalLimit, bool ApprovalUnlimited, bool IsActive = true);
 
@@ -22,7 +23,8 @@ public sealed record RoleSummary(Guid Id, string Name, string Description, bool 
 public sealed record SaveRole(string Name, string Description, IReadOnlyList<string> Permissions);
 
 /// <summary>The admin's identity of record for audit entries.</summary>
-public sealed record Actor(Guid? Id, string Name);
+/// <param name="ClaimsSuperAdmin">From the sign-in claims; only used when there is no user id (development sign-in).</param>
+public sealed record Actor(Guid? Id, string Name, bool ClaimsSuperAdmin = false);
 
 /// <summary>
 /// User and role administration with guard rails (ADR-0009): never zero active administrators, no self-escalation,
@@ -45,7 +47,7 @@ public sealed class UserAdminService(InvoiceFlowDbContext db, PermissionResolver
             u.Id, u.Email, u.DisplayName, u.IsActive,
             links.Where(l => l.UserId == u.Id).Select(l => new RoleRef(l.Id, l.Name)).OrderBy(r => r.Name, StringComparer.Ordinal).ToList(),
             u.ApprovalLimit, u.ApprovalUnlimited, u.LastLoginAt, u.LockoutEndUtc > now ? u.LockoutEndUtc : null,
-            u.MustChangePassword, u.CreatedAt, u.PasswordHash is not null)).ToList();
+            u.MustChangePassword, u.CreatedAt, u.PasswordHash is not null, u.MfaSecret is not null)).ToList();
     }
 
     /// <returns>The new user's id and a one-time temporary password (shown to the admin once, never stored in clear).</returns>
@@ -60,6 +62,11 @@ public sealed class UserAdminService(InvoiceFlowDbContext db, PermissionResolver
         }
 
         await EnsureRolesExistAsync(req.RoleIds, ct).ConfigureAwait(false);
+        if (req.RoleIds.Contains(await SuperRoleIdAsync(ct).ConfigureAwait(false)))
+        {
+            await RequireSuperAsync(actor, ct).ConfigureAwait(false);
+        }
+
         var temp = TemporaryPassword();
         var user = new UserRow
         {
@@ -102,6 +109,12 @@ public sealed class UserAdminService(InvoiceFlowDbContext db, PermissionResolver
         }
 
         await EnsureRolesExistAsync(newRoles, ct).ConfigureAwait(false);
+        var superId = await SuperRoleIdAsync(ct).ConfigureAwait(false);
+        if (currentRoles.Contains(superId) || newRoles.Contains(superId))
+        {
+            await RequireSuperAsync(actor, ct).ConfigureAwait(false);
+        }
+
         var before = await DescribeAsync(user, currentRoles, ct).ConfigureAwait(false);
 
         user.DisplayName = Required(req.DisplayName, "Display name");
@@ -125,30 +138,90 @@ public sealed class UserAdminService(InvoiceFlowDbContext db, PermissionResolver
         permissions.Invalidate(id);
     }
 
-    public async Task<string> ResetPasswordAsync(Guid id, Actor actor, CancellationToken ct)
+    /// <summary>
+    /// An administrator sets another user's password: the one they typed (checked against the password policy) or,
+    /// when empty, a generated one. The user's sessions end, and a lockout is cleared. The password itself is never logged.
+    /// </summary>
+    /// <returns>The new password, so the administrator can pass it on.</returns>
+    public async Task<string> ResetPasswordAsync(Guid id, Actor actor, CancellationToken ct, string? newPassword = null, bool mustChange = true)
     {
+        ArgumentNullException.ThrowIfNull(actor);
+        if (actor.Id == id)
+        {
+            throw new WorkflowException(WorkflowErrorKind.Forbidden, "To change your own password, use \"Change password\" in your account menu.");
+        }
+
         var user = await db.Users.FirstOrDefaultAsync(u => u.Id == id, ct).ConfigureAwait(false)
                    ?? throw new WorkflowException(WorkflowErrorKind.NotFound, "User not found.");
-        var temp = TemporaryPassword();
-        user.PasswordHash = Hasher.HashPassword(user, temp);
-        user.MustChangePassword = true;
+        if (user.PasswordHash is null)
+        {
+            throw new WorkflowException(WorkflowErrorKind.BadRequest, "This user signs in with Microsoft only and has no password here.");
+        }
+
+        await RequireSuperIfTargetIsSuperAsync(id, actor, ct).ConfigureAwait(false);
+
+        var chosen = !string.IsNullOrEmpty(newPassword);
+        var password = chosen ? newPassword! : TemporaryPassword();
+        if (chosen)
+        {
+            var problems = PasswordPolicy.Check(password, user.Email);
+            if (problems.Count > 0)
+            {
+                throw new WorkflowException(WorkflowErrorKind.BadRequest, string.Join(" ", problems));
+            }
+        }
+
+        user.PasswordHash = Hasher.HashPassword(user, password);
+        user.MustChangePassword = mustChange;
         user.FailedLoginCount = 0;
         user.LockoutEndUtc = null;
         user.SecurityStamp = Guid.NewGuid().ToString("N");
         await RevokeSessionsAsync(id, ct).ConfigureAwait(false);
-        Audit("PasswordReset", id, user.Email, actor, new { note = "temporary password issued; change required at next sign-in" });
+        Audit("PasswordReset", id, user.Email, actor, new
+        {
+            note = chosen ? "password set by administrator" : "temporary password generated",
+            mustChangeAtNextSignIn = mustChange,
+        });
         await db.SaveChangesAsync(ct).ConfigureAwait(false);
         permissions.Invalidate(id);
-        return temp;
+        return password;
     }
 
     public async Task SignOutEverywhereAsync(Guid id, Actor actor, CancellationToken ct)
     {
         var user = await db.Users.FirstOrDefaultAsync(u => u.Id == id, ct).ConfigureAwait(false)
                    ?? throw new WorkflowException(WorkflowErrorKind.NotFound, "User not found.");
+        await RequireSuperIfTargetIsSuperAsync(id, actor, ct).ConfigureAwait(false);
         user.SecurityStamp = Guid.NewGuid().ToString("N");
         await RevokeSessionsAsync(id, ct).ConfigureAwait(false);
         Audit("SignedOutByAdmin", id, user.Email, actor, null);
+        await db.SaveChangesAsync(ct).ConfigureAwait(false);
+        permissions.Invalidate(id);
+    }
+
+    /// <summary>
+    /// The user lost their phone and recovery codes: turn two-step sign-in off and end their sessions. If their role
+    /// requires it, they are asked to set it up again right after their next sign-in.
+    /// </summary>
+    public async Task ResetMfaAsync(Guid id, Actor actor, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(actor);
+        if (actor.Id == id)
+        {
+            throw new WorkflowException(WorkflowErrorKind.Forbidden, "You can't reset your own two-step sign-in. Ask another administrator.");
+        }
+
+        var user = await db.Users.FirstOrDefaultAsync(u => u.Id == id, ct).ConfigureAwait(false)
+                   ?? throw new WorkflowException(WorkflowErrorKind.NotFound, "User not found.");
+        await RequireSuperIfTargetIsSuperAsync(id, actor, ct).ConfigureAwait(false);
+        user.MfaSecret = null;
+        user.MfaPendingSecret = null;
+        user.MfaEnabledAt = null;
+        user.MfaLastTimeStep = null;
+        user.SecurityStamp = Guid.NewGuid().ToString("N");
+        await db.RecoveryCodes.Where(r => r.UserId == id).ExecuteDeleteAsync(ct).ConfigureAwait(false);
+        await RevokeSessionsAsync(id, ct).ConfigureAwait(false);
+        Audit("MfaReset", id, user.Email, actor, new { note = "two-step sign-in reset by administrator; sessions ended" });
         await db.SaveChangesAsync(ct).ConfigureAwait(false);
         permissions.Invalidate(id);
     }
@@ -198,6 +271,11 @@ public sealed class UserAdminService(InvoiceFlowDbContext db, PermissionResolver
         var role = await db.Roles.Include(r => r.Permissions).FirstOrDefaultAsync(r => r.Id == id, ct).ConfigureAwait(false)
                    ?? throw new WorkflowException(WorkflowErrorKind.NotFound, "Role not found.");
         var name = Required(req.Name, "Role name");
+        if (role.Name == BuiltInRoles.SuperAdmin && !role.Permissions.Select(p => p.Permission).ToHashSet().SetEquals(ValidPermissions(req.Permissions)))
+        {
+            throw new WorkflowException(WorkflowErrorKind.Forbidden, "Super admin always has every permission. It can't be changed.");
+        }
+
         if (role.IsSystem && name != role.Name)
         {
             throw new WorkflowException(WorkflowErrorKind.BadRequest, "Built-in roles can't be renamed.");
@@ -249,6 +327,7 @@ public sealed class UserAdminService(InvoiceFlowDbContext db, PermissionResolver
     /// <summary>Saves in a transaction and rolls back if no active user would still hold admin.users.</summary>
     private async Task SaveKeepingAnAdminAsync(CancellationToken ct)
     {
+        var superBefore = await ActiveSuperAdminsAsync(ct).ConfigureAwait(false);
         var strategy = db.Database.CreateExecutionStrategy();
         await strategy.ExecuteAsync(async () =>
         {
@@ -266,8 +345,48 @@ public sealed class UserAdminService(InvoiceFlowDbContext db, PermissionResolver
                     "This change would leave no active administrator. Give someone else the 'Manage users' permission first.");
             }
 
+            if (superBefore > 0 && await ActiveSuperAdminsAsync(ct).ConfigureAwait(false) == 0)
+            {
+                await tx.RollbackAsync(ct).ConfigureAwait(false);
+                db.ChangeTracker.Clear();
+                throw new WorkflowException(WorkflowErrorKind.Conflict,
+                    "This change would leave no active super admin. Make someone else super admin first.");
+            }
+
             await tx.CommitAsync(ct).ConfigureAwait(false);
         }).ConfigureAwait(false);
+    }
+
+    private Task<int> ActiveSuperAdminsAsync(CancellationToken ct) =>
+        db.UserRoles.Join(db.Roles.Where(r => r.Name == BuiltInRoles.SuperAdmin), ur => ur.RoleId, r => r.Id, (ur, _) => ur.UserId)
+            .Join(db.Users.Where(u => u.IsActive), id => id, u => u.Id, (id, _) => id)
+            .Distinct().CountAsync(ct);
+
+    private async Task<Guid> SuperRoleIdAsync(CancellationToken ct) =>
+        await db.Roles.Where(r => r.Name == BuiltInRoles.SuperAdmin).Select(r => r.Id).FirstOrDefaultAsync(ct).ConfigureAwait(false);
+
+    private async Task<bool> IsSuperAsync(Guid userId, CancellationToken ct)
+    {
+        var superId = await SuperRoleIdAsync(ct).ConfigureAwait(false);
+        return await db.UserRoles.AnyAsync(ur => ur.UserId == userId && ur.RoleId == superId, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>Only a super admin may grant/remove the role or manage a super admin's account (no takeover by a user-manager).</summary>
+    private async Task RequireSuperAsync(Actor actor, CancellationToken ct)
+    {
+        var isSuper = actor.Id is { } id ? await IsSuperAsync(id, ct).ConfigureAwait(false) : actor.ClaimsSuperAdmin;
+        if (!isSuper)
+        {
+            throw new WorkflowException(WorkflowErrorKind.Forbidden, "Only a super admin can manage super admin accounts or grant that role.");
+        }
+    }
+
+    private async Task RequireSuperIfTargetIsSuperAsync(Guid targetId, Actor actor, CancellationToken ct)
+    {
+        if (await IsSuperAsync(targetId, ct).ConfigureAwait(false))
+        {
+            await RequireSuperAsync(actor, ct).ConfigureAwait(false);
+        }
     }
 
     private Task RevokeSessionsAsync(Guid userId, CancellationToken ct)

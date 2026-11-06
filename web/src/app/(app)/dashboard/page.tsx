@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useQuery } from "@tanstack/react-query";
 import { AlertTriangle, ArrowRight, CheckCircle2, CircleCheckBig, FileSearch, Gauge, Hourglass, Inbox, Send, Upload, Wallet } from "lucide-react";
 import { api } from "@/lib/api";
+import { personLabel } from "@/lib/people";
 import { useAuth } from "@/lib/auth";
 import { useI18n } from "@/lib/i18n";
 import type { InvoiceStatus } from "@/lib/types";
@@ -16,7 +17,7 @@ interface Dashboard {
   postedValue30Days: { currency: string; total: number }[];
   approvableByMe: number; myApprovalLimit: number | null; myApprovalUnlimited: boolean;
   series: DayPoint[];
-  activity: { at: string; actor: string; action: string; toStatus: InvoiceStatus | null; documentId: string; fileName: string; supplierName: string | null }[];
+  activity: { at: string; actor: string; actorName: string | null; action: string; toStatus: InvoiceStatus | null; documentId: string; fileName: string; supplierName: string | null }[];
 }
 
 export default function DashboardPage() {
@@ -84,7 +85,7 @@ export default function DashboardPage() {
                       <span className="font-medium">{a.supplierName ?? a.fileName}</span>
                       {a.toStatus && <StatusBadge status={a.toStatus} />}
                     </Link>
-                    <p className="text-xs text-slate-500">{a.actor} · {dateTime(a.at)}</p>
+                    <p className="text-xs text-slate-500"><span dir="auto">{personLabel(a.actor, a.actorName, t)}</span> · {dateTime(a.at)}</p>
                   </li>
                 ))}
               </ul>

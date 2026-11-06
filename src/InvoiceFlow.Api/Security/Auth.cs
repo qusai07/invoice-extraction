@@ -61,6 +61,14 @@ public static class AuthSetup
         }
         else if (mode == SessionMode)
         {
+            // Two-step sign-in is mandatory for admins/approvers: production must not start without the key that protects it.
+            var session = builder.Configuration.GetSection(InvoiceFlow.Infrastructure.Identity.SessionOptions.SectionName).Get<InvoiceFlow.Infrastructure.Identity.SessionOptions>() ?? new InvoiceFlow.Infrastructure.Identity.SessionOptions();
+            if (session.RequireMfaForPrivileged && !new MfaSecretProtector(session).IsConfigured && !builder.Environment.IsDevelopment())
+            {
+                throw new InvalidOperationException(
+                    $"Configure {InvoiceFlow.Infrastructure.Identity.SessionOptions.SectionName}:MfaEncryptionKey (32 random bytes, base64; Key Vault) or set RequireMfaForPrivileged=false.");
+            }
+
             builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme).AddJwtBearer();
             builder.Services.AddOptions<JwtBearerOptions>(JwtBearerDefaults.AuthenticationScheme)
                 .Configure<TokenIssuer>((o, issuer) =>
@@ -99,7 +107,8 @@ public static class AuthSetup
     /// <summary>
     /// The token is valid; is the user still allowed in? Rejects deactivated users and tokens from before a password change,
     /// role change or logout-everywhere (security stamp). Adds the user's current permissions as claims.
-    /// A user who must change their password gets no permissions: only /api/me, change-password and logout work.
+    /// A user who must change their password or set up two-step sign-in gets no permissions: only /api/me and the account
+    /// endpoints (change password, two-step setup, logout) work.
     /// </summary>
     private static async Task ValidateCurrentStateAsync(TokenValidatedContext ctx)
     {
@@ -120,7 +129,7 @@ public static class AuthSetup
         }
 
         var identity = (ClaimsIdentity)ctx.Principal!.Identity!;
-        if (!user.MustChangePassword)
+        if (!user.Restricted)
         {
             identity.AddClaims(user.Permissions.Select(p => new Claim(SessionClaims.Permission, p)));
             var limit = user.ApprovalUnlimited ? ApprovalLimitClaim.Unlimited : user.ApprovalLimit?.ToString(System.Globalization.CultureInfo.InvariantCulture);

@@ -120,6 +120,10 @@ export interface InvoiceDetails {
   validation: ValidationReport | null;
   corrections: Correction[];
   audit: AuditEvent[];
+  /** Set for duplicates: the earlier document this one repeats. */
+  duplicateOf: { id: string; fileName: string; receivedAt: string; status: InvoiceStatus; reason: "file" | "number" } | null;
+  /** User id → display name, for everyone mentioned on this invoice. */
+  people: Record<string, string> | null;
 }
 
 export interface InvoiceSummary {
@@ -135,6 +139,7 @@ export interface InvoiceSummary {
   currency: string | null;
   total: number | null;
   errorCodes: string[];
+  submittedByName: string | null;
 }
 
 export interface Me {
@@ -148,6 +153,9 @@ export interface Me {
   approvalUnlimited: boolean;
   mustChangePassword: boolean;
   language: string;
+  mfaEnabled: boolean;
+  /** Admin/approver without two-step sign-in: limited to the setup page until it is on. */
+  mfaSetupRequired: boolean;
 }
 
 export const emptyInvoice = (): Invoice => ({

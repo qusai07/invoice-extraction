@@ -17,6 +17,43 @@ public static class InvoiceEndpoints
 
     public sealed record SubmitResponse(Guid Id, InvoiceStatus Status);
 
+    public sealed record PoLineOption(string? Sku, string Description, decimal Remaining, decimal UnitPrice);
+
+    public sealed record PoOption(string PoNumber, string Currency, decimal Total, int MatchingLines, int InvoiceLines, IReadOnlyList<PoLineOption> Lines);
+
+    /// <summary>
+    /// Open POs of the invoice's supplier. "Matching" = invoice lines whose item code (or description) appears on the PO,
+    /// a hint for the reviewer only; the rules still decide.
+    /// </summary>
+    private static async Task<IResult> PurchaseOrdersAsync(Guid id, IInvoiceStore store, Application.MasterData.IMasterDataService masterData, CancellationToken ct)
+    {
+        var d = await store.GetDetailsAsync(id, ct);
+        if (d is null)
+        {
+            return TypedResults.NotFound();
+        }
+
+        var supplierId = d.Validation?.SupplierId ?? d.Document.SupplierId;
+        if (supplierId is null)
+        {
+            return TypedResults.Ok(Array.Empty<PoOption>());
+        }
+
+        var lines = d.Invoice?.Lines ?? [];
+        var pos = await masterData.ListOpenPurchaseOrdersAsync(supplierId, ct);
+        var options = pos.Select(po =>
+            {
+                var matching = lines.Count(l => po.Lines.Any(pl =>
+                    (l.Sku is { Length: > 0 } sku && string.Equals(sku.Trim(), pl.Sku, StringComparison.OrdinalIgnoreCase)) ||
+                    (l.Description is { Length: > 3 } desc && pl.Description.Contains(desc.Trim(), StringComparison.OrdinalIgnoreCase))));
+                return new PoOption(po.PoNumber, po.Currency, po.Lines.Sum(l => l.Quantity * l.UnitPrice), matching, lines.Count,
+                    po.Lines.Select(l => new PoLineOption(l.Sku, l.Description, l.RemainingToInvoice, l.UnitPrice)).ToList());
+            })
+            .OrderByDescending(o => o.MatchingLines).ThenBy(o => o.PoNumber, StringComparer.Ordinal)
+            .ToList();
+        return TypedResults.Ok(options);
+    }
+
     public static void MapInvoiceEndpoints(this IEndpointRouteBuilder app)
     {
         var g = app.MapGroup("/api/invoices").WithTags("Invoices");
@@ -35,6 +72,9 @@ public static class InvoiceEndpoints
 
         g.MapGet("/{id:guid}/file", GetFileAsync).RequireAuthorization(Policies.Read)
             .WithSummary("The original document.");
+
+        g.MapGet("/{id:guid}/purchase-orders", PurchaseOrdersAsync).RequireAuthorization(Policies.Correct)
+            .WithSummary("The supplier's open purchase orders, best match for this invoice's lines first (to pick a PO number).");
 
         g.MapPut("/{id:guid}/data", (Guid id, InvoiceDto data, ClaimsPrincipal user, InvoiceWorkflow wf, CancellationToken ct) =>
                 Run(async () => TypedResults.Ok(await wf.CorrectAsync(id, data, user.ToUserContext(), ct))))
@@ -55,6 +95,11 @@ public static class InvoiceEndpoints
                 Run(async () => { await wf.RejectAsync(id, body.Reason, user.ToUserContext(), ct); return TypedResults.NoContent(); }))
             .RequireAuthorization(Policies.Reject)
             .WithSummary("Reject (reason required).");
+
+        g.MapPost("/{id:guid}/reread", (Guid id, ClaimsPrincipal user, InvoiceWorkflow wf, CancellationToken ct) =>
+                Run(async () => { await wf.RereadAsync(id, user.ToUserContext(), ct); return TypedResults.Accepted($"/api/invoices/{id}"); }))
+            .RequireAuthorization(Policies.Correct)
+            .WithSummary("Read the file again, for invoices in review whose first read produced no data.");
 
         g.MapPost("/{id:guid}/retry-posting", (Guid id, ClaimsPrincipal user, InvoiceWorkflow wf, CancellationToken ct) =>
                 Run(async () => { await wf.RetryPostingAsync(id, user.ToUserContext(), ct); return TypedResults.Accepted($"/api/invoices/{id}"); }))

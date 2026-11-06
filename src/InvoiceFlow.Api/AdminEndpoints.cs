@@ -21,6 +21,8 @@ public static class AdminEndpoints
 
     public sealed record TemporaryPasswordResponse(string TemporaryPassword);
 
+    public sealed record ResetPasswordRequest(string? Password, bool? MustChange);
+
     public sealed record RuleView(
         string Code, string Category, string NameEn, string NameAr, string DescriptionEn, string DescriptionAr,
         bool Locked, bool Enabled, Severity? Severity);
@@ -32,7 +34,8 @@ public static class AdminEndpoints
 
     private static Actor ActorOf(ClaimsPrincipal user) =>
         new(Guid.TryParse(user.FindFirstValue("sub"), out var id) ? id : null,
-            user.FindFirstValue("email") ?? user.FindFirstValue("name") ?? "unknown");
+            user.FindFirstValue("email") ?? user.FindFirstValue("name") ?? "unknown",
+            user.HasClaim(c => c.Type is ClaimTypes.Role or "roles" && c.Value == BuiltInRoles.SuperAdmin));
 
     public static void MapAdminEndpoints(this IEndpointRouteBuilder app)
     {
@@ -56,8 +59,17 @@ public static class AdminEndpoints
             }))
             .RequireAuthorization(Permissions.AdminUsers);
 
-        admin.MapPost("/users/{id:guid}/reset-password", (Guid id, ClaimsPrincipal u, UserAdminService svc, CancellationToken ct) => Run(async () =>
-                TypedResults.Ok(new TemporaryPasswordResponse(await svc.ResetPasswordAsync(id, ActorOf(u), ct)))))
+        // Body optional: { password?: string, mustChange?: bool }. No password → one is generated.
+        admin.MapPost("/users/{id:guid}/reset-password", (Guid id, ResetPasswordRequest? body, ClaimsPrincipal u, UserAdminService svc, CancellationToken ct) => Run(async () =>
+                TypedResults.Ok(new TemporaryPasswordResponse(
+                    await svc.ResetPasswordAsync(id, ActorOf(u), ct, body?.Password, body?.MustChange ?? true)))))
+            .RequireAuthorization(Permissions.AdminUsers);
+
+        admin.MapPost("/users/{id:guid}/reset-mfa", (Guid id, ClaimsPrincipal u, UserAdminService svc, CancellationToken ct) => Run(async () =>
+            {
+                await svc.ResetMfaAsync(id, ActorOf(u), ct);
+                return TypedResults.NoContent();
+            }))
             .RequireAuthorization(Permissions.AdminUsers);
 
         admin.MapPost("/users/{id:guid}/sign-out", (Guid id, ClaimsPrincipal u, UserAdminService svc, CancellationToken ct) => Run(async () =>
@@ -98,8 +110,15 @@ public static class AdminEndpoints
 
         // ---------------- security log (sign-ins, admin changes) ----------------
         admin.MapGet("/security-events", async (InvoiceFlowDbContext db, CancellationToken ct, [FromQuery] int take = 200) =>
-                TypedResults.Ok(await db.SecurityEvents.AsNoTracking().OrderByDescending(e => e.Id).Take(Math.Clamp(take, 1, 500))
-                    .Select(e => new { e.Id, e.At, e.Event, e.Email, e.Actor, e.IpAddress, e.Details }).ToListAsync(ct)))
+            {
+                var rows = await db.SecurityEvents.AsNoTracking().OrderByDescending(e => e.Id).Take(Math.Clamp(take, 1, 500))
+                    .Select(e => new { e.Id, e.At, e.Event, e.Email, e.Actor, e.IpAddress, e.Details }).ToListAsync(ct);
+                var names = await UserNames.ResolveAsync(db, rows.Select(r => r.Actor), ct);
+                return TypedResults.Ok(rows.Select(r => new
+                {
+                    r.Id, r.At, r.Event, r.Email, r.Actor, ActorName = r.Actor is null ? null : names.GetValueOrDefault(r.Actor), r.IpAddress, r.Details,
+                }).ToList());
+            })
             .RequireAuthorization(Policies.SecurityLogRead);
 
         // ---------------- validation rules & settings ----------------
@@ -179,7 +198,11 @@ public static class AdminEndpoints
                 var q = db.AuditEvents.AsNoTracking();
                 if (!string.IsNullOrWhiteSpace(actor))
                 {
-                    q = q.Where(e => e.Actor.Contains(actor));
+                    // Search by name as well as by id: the screen shows names.
+                    var term = actor.Trim();
+                    var ids = (await db.Users.AsNoTracking().Where(u => u.DisplayName.Contains(term) || (u.Email != null && u.Email.Contains(term)))
+                        .Select(u => u.Id).Take(50).ToListAsync(ct)).Select(g => g.ToString()).ToList();
+                    q = q.Where(e => e.Actor.Contains(term) || ids.Contains(e.Actor));
                 }
 
                 if (!string.IsNullOrWhiteSpace(action))
@@ -193,7 +216,12 @@ public static class AdminEndpoints
                         e.Id, e.At, e.Actor, e.Action, e.FromStatus, e.ToStatus, e.Details, e.DocumentId, d.FileName, d.SupplierName, d.InvoiceNumber,
                     })
                     .ToListAsync(ct);
-                return TypedResults.Ok(rows);
+                var names = await UserNames.ResolveAsync(db, rows.Select(r => r.Actor), ct);
+                return TypedResults.Ok(rows.Select(r => new
+                {
+                    r.Id, r.At, r.Actor, ActorName = names.GetValueOrDefault(r.Actor), r.Action, r.FromStatus, r.ToStatus, r.Details,
+                    r.DocumentId, r.FileName, r.SupplierName, r.InvoiceNumber,
+                }).ToList());
             })
             .RequireAuthorization(Permissions.AuditRead)
             .WithTags("Audit");
@@ -272,6 +300,7 @@ public static class AdminEndpoints
         var activity = await db.AuditEvents.AsNoTracking().OrderByDescending(e => e.Id)
             .Join(docs, e => e.DocumentId, d => d.Id, (e, d) => new { e.At, e.Actor, e.Action, e.ToStatus, e.DocumentId, d.FileName, d.SupplierName })
             .Take(8).ToListAsync(ct);
+        var activityNames = await UserNames.ResolveAsync(db, activity.Select(a => a.Actor), ct);
 
         return TypedResults.Ok(new
         {
@@ -291,7 +320,7 @@ public static class AdminEndpoints
             MyApprovalLimit = limit == decimal.MaxValue ? (decimal?)null : limit,
             MyApprovalUnlimited = limit == decimal.MaxValue,
             Series = series,
-            Activity = activity,
+            Activity = activity.Select(a => new { a.At, a.Actor, ActorName = activityNames.GetValueOrDefault(a.Actor), a.Action, a.ToStatus, a.DocumentId, a.FileName, a.SupplierName }),
         });
     }
 }

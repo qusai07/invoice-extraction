@@ -8,8 +8,9 @@ import {
   MonitorOff, ScrollText, ShieldCheck, Truck, Upload, Users, X,
 } from "lucide-react";
 import clsx from "clsx";
-import { AUTH_MODE, useAuth } from "@/lib/auth";
+import { AUTH_MODE, requiredAccountStep, useAuth } from "@/lib/auth";
 import { useI18n, type I18nKey } from "@/lib/i18n";
+import { roleName } from "@/lib/roles";
 
 interface NavItem { href: string; label: I18nKey; icon: React.ComponentType<{ size?: number; className?: string }>; show: (p: string[]) => boolean }
 interface NavSection { label: I18nKey; items: NavItem[] }
@@ -42,7 +43,7 @@ const NAV: NavSection[] = [
 ];
 
 export function Shell({ children }: { children: React.ReactNode }) {
-  const { t } = useI18n();
+  const { t, lang } = useI18n();
   const { me, loading } = useAuth();
   const router = useRouter();
   const pathname = usePathname();
@@ -51,12 +52,15 @@ export function Shell({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     if (loading) return;
     if (!me) router.replace(`/login?next=${encodeURIComponent(pathname)}`);
-    else if (me.mustChangePassword) router.replace(`/account/password?next=${encodeURIComponent(pathname)}`);
+    else {
+      const step = requiredAccountStep(me, pathname);
+      if (step) router.replace(step);
+    }
   }, [loading, me, pathname, router]);
 
   useEffect(() => setDrawer(false), [pathname]);
 
-  if (!me || me.mustChangePassword) {
+  if (!me || me.mustChangePassword || me.mfaSetupRequired) {
     return <div className="p-8 text-slate-500">{t("common.loading")}</div>;
   }
 
@@ -102,7 +106,7 @@ export function Shell({ children }: { children: React.ReactNode }) {
           })}
         </nav>
         <div className="border-t border-slate-100 px-4 py-3 text-xs text-slate-400">
-          {me.roles.join(" · ") || "—"}
+          {me.roles.map((r) => roleName(r, lang)).join(" · ") || "—"}
         </div>
       </aside>
       {drawer && <div className="fixed inset-0 z-20 bg-black/20 lg:hidden" onClick={() => setDrawer(false)} />}
@@ -133,7 +137,7 @@ function LanguageButton() {
 }
 
 function UserMenu() {
-  const { t } = useI18n();
+  const { t, lang } = useI18n();
   const { me, signOut, signOutEverywhere } = useAuth();
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
@@ -158,14 +162,18 @@ function UserMenu() {
       {open && (
         <div role="menu" className="card absolute end-0 z-30 mt-1 w-64 py-1 shadow-lg">
           <div className="border-b border-slate-100 px-3 py-2">
-            <p className="font-medium">{me.name}</p>
+            <p className="font-medium" dir="auto">{me.name}</p>
             {me.email && <p className="truncate text-xs text-slate-500" dir="ltr">{me.email}</p>}
-            <p className="mt-0.5 text-xs text-slate-500">{me.roles.join(", ")}</p>
+            <p className="mt-0.5 text-xs text-slate-500">{me.roles.map((r) => roleName(r, lang)).join(lang === "ar" ? "، " : ", ")}</p>
           </div>
           {AUTH_MODE === "session" && (
             <>
               <Link role="menuitem" href="/account/password" className="flex items-center gap-2 px-3 py-2 hover:bg-slate-50" onClick={() => setOpen(false)}>
                 <KeyRound size={14} /> {t("auth.changePassword")}
+              </Link>
+              <Link role="menuitem" href="/account/security" className="flex items-center gap-2 px-3 py-2 hover:bg-slate-50" onClick={() => setOpen(false)}>
+                <ShieldCheck size={14} /> {t("mfa.menu")}
+                <span className={me.mfaEnabled ? "ms-auto text-xs text-emerald-700" : "ms-auto text-xs text-slate-400"}>{me.mfaEnabled ? t("mfa.on") : t("mfa.off")}</span>
               </Link>
               <button role="menuitem" className="flex w-full items-center gap-2 px-3 py-2 text-start hover:bg-slate-50" onClick={() => void signOutEverywhere()}>
                 <MonitorOff size={14} /> {t("auth.signOutEverywhere")}

@@ -8,17 +8,18 @@ import clsx from "clsx";
 import { api, blobUrl } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { useI18n } from "@/lib/i18n";
+import { personLabel } from "@/lib/people";
 import type { InvoiceStatus } from "@/lib/types";
 import { Card, ErrorNote, PageHeader, StatusBadge } from "@/components/ui";
 
 interface InvoiceEvent {
-  id: number; at: string; actor: string; action: string; fromStatus: InvoiceStatus | null; toStatus: InvoiceStatus | null;
+  id: number; at: string; actor: string; actorName: string | null; action: string; fromStatus: InvoiceStatus | null; toStatus: InvoiceStatus | null;
   details: string | null; documentId: string; fileName: string; supplierName: string | null; invoiceNumber: string | null;
 }
-interface SecurityEvent { id: number; at: string; event: string; email: string | null; actor: string | null; ipAddress: string | null; details: string | null }
+interface SecurityEvent { id: number; at: string; event: string; email: string | null; actor: string | null; actorName: string | null; ipAddress: string | null; details: string | null }
 
 export default function AuditPage() {
-  const { t, dateTime } = useI18n();
+  const { t, label, dateTime } = useI18n();
   const { me } = useAuth();
   const canInvoices = !!me?.permissions.includes("audit.read");
   const canExport = !!me?.permissions.includes("audit.export");
@@ -43,7 +44,7 @@ export default function AuditPage() {
     URL.revokeObjectURL(url);
   };
 
-  const filteredSecurity = (security.data ?? []).filter((e) => !actor || `${e.actor ?? ""} ${e.email ?? ""}`.toLowerCase().includes(actor.toLowerCase()));
+  const filteredSecurity = (security.data ?? []).filter((e) => !actor || `${e.actor ?? ""} ${e.actorName ?? ""} ${e.email ?? ""}`.toLowerCase().includes(actor.toLowerCase()));
 
   return (
     <div className="mx-auto max-w-7xl p-4 lg:p-6">
@@ -76,20 +77,20 @@ export default function AuditPage() {
                 ? (invoices.data ?? []).map((e) => (
                   <tr key={e.id} className="border-b border-slate-50 align-top">
                     <td className="whitespace-nowrap py-2 text-xs text-slate-500">{dateTime(e.at)}</td>
-                    <td className="py-2">{e.actor}</td>
-                    <td className="py-2">{e.toStatus ? <StatusBadge status={e.toStatus} /> : <span className="rounded bg-slate-100 px-1.5 text-xs">{e.action}</span>}</td>
+                    <td className="py-2" dir="auto">{personLabel(e.actor, e.actorName, t)}</td>
+                    <td className="py-2">{e.toStatus ? <StatusBadge status={e.toStatus} /> : <span className="rounded bg-slate-100 px-1.5 text-xs">{label("evt.", e.action)}</span>}</td>
                     <td className="py-2"><Link className="text-brand-600 hover:underline" href={`/invoices/${e.documentId}`}>{e.supplierName ?? e.fileName}</Link>
                       {e.invoiceNumber && <span className="block text-xs text-slate-500 ltr-value">{e.invoiceNumber}</span>}</td>
-                    <td className="py-2 text-xs text-slate-600">{e.details}</td>
+                    <td className="py-2 text-xs text-slate-600" dir="auto">{e.details}</td>
                   </tr>
                 ))
                 : filteredSecurity.map((e) => (
                   <tr key={e.id} className="border-b border-slate-50 align-top">
                     <td className="whitespace-nowrap py-2 text-xs text-slate-500">{dateTime(e.at)}</td>
-                    <td className="py-2"><span dir="ltr">{e.actor ?? e.email ?? "—"}</span>
+                    <td className="py-2"><span dir="auto">{e.actor ? personLabel(e.actor, e.actorName, t) : (e.email ?? "—")}</span>
                       {e.ipAddress && <span className="block text-xs text-slate-400" dir="ltr">{e.ipAddress}</span>}</td>
                     <td className="py-2"><span className={clsx("rounded px-1.5 py-0.5 text-xs",
-                      /Failed|Lock|Reuse/.test(e.event) ? "bg-red-50 text-red-700" : "bg-slate-100")}>{e.event}</span>
+                      /Failed|Lock|Reuse/.test(e.event) ? "bg-red-50 text-red-700" : "bg-slate-100")}>{label("evt.", e.event)}</span>
                       {e.email && e.actor && <span className="block text-xs text-slate-500" dir="ltr">{e.email}</span>}</td>
                     <td className="max-w-md break-words py-2 font-mono text-[11px] text-slate-600" dir="ltr">{e.details}</td>
                   </tr>

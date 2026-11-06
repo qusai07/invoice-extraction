@@ -125,7 +125,7 @@ const RULES: Record<string, [string, string]> = {
   "VAT-002": ["VAT without TRN", "ضريبة بلا رقم ضريبي"], "SUP-001": ["Unknown supplier", "مورد غير معروف"],
   "SUP-002": ["IBAN changed", "تغيّر الآيبان"], "SUP-003": ["TRN mismatch", "اختلاف الرقم الضريبي"],
   "DUP-001": ["Duplicate file", "ملف مكرر"], "DUP-002": ["Duplicate invoice", "فاتورة مكررة"],
-  "PO-001": ["PO problem", "مشكلة أمر الشراء"], "PO-002": ["Line not on PO", "بند خارج أمر الشراء"],
+  "PO-001": ["Purchase order missing or not found", "أمر الشراء مفقود أو غير موجود"], "PO-002": ["Line not on PO", "بند خارج أمر الشراء"],
   "PO-003": ["Price vs PO", "السعر مقابل أمر الشراء"], "PO-004": ["Qty over PO", "كمية تتجاوز أمر الشراء"],
   "PO-005": ["Currency vs PO", "العملة مقابل أمر الشراء"], "GRN-001": ["Not received", "غير مستلمة"],
   "APR-001": ["Needs 2nd approver", "يلزم اعتماد ثانٍ"],
@@ -137,6 +137,8 @@ interface I18n {
   t: (k: Key) => string;
   status: (s: InvoiceStatus) => string;
   rule: (code: string) => string;
+  /** Translate a value that comes from the API (event name, job step…): key `prefix + value`, else the raw value. */
+  label: (prefix: string, value: string) => string;
   toggle: () => void;
   money: (v: number | null | undefined, currency?: string | null) => string;
   date: (iso: string | null | undefined) => string;
@@ -182,6 +184,10 @@ export function I18nProvider({ children }: { children: React.ReactNode }) {
       t: (k) => (lang === "ar" ? ar[k] : en[k]),
       status: (s) => STATUS[s]?.[lang === "ar" ? 1 : 0] ?? s,
       rule: (code) => RULES[code]?.[lang === "ar" ? 1 : 0] ?? code,
+      label: (prefix, value) => {
+        const dict: Record<string, string> = lang === "ar" ? ar : en;
+        return dict[prefix + value] ?? value;
+      },
       toggle,
       money: (v, currency) => (v == null ? "—" : `${moneyFmt.format(v)}${currency ? ` ${currency}` : ""}`),
       date: (iso) => (iso ? dateFmt.format(new Date(iso.length === 10 ? `${iso}T00:00:00` : iso)) : "—"),

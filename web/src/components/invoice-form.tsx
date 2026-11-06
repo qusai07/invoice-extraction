@@ -93,7 +93,7 @@ export function fromForm(f: FormState): { invoice: Invoice } | { invalid: string
 }
 
 export function InvoiceForm({
-  form, onChange, editable, errorFields, invalidFields, evidence, lineMatches, onHighlight,
+  form, onChange, editable, errorFields, invalidFields, evidence, lineMatches, onHighlight, afterHeader,
 }: {
   form: FormState;
   onChange: (f: FormState) => void;
@@ -103,6 +103,8 @@ export function InvoiceForm({
   evidence: FieldEvidence[];
   lineMatches: LineMatch[];
   onHighlight: (h: Highlight | null) => void;
+  /** Extra help shown under the header fields (e.g. the PO picker). */
+  afterHeader?: React.ReactNode;
 }) {
   const { t, money } = useI18n();
   const ev = (path: string) => evidence.find((e) => e.field === path);
@@ -152,6 +154,7 @@ export function InvoiceForm({
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
           {HEADER.map((h) => field(h.key, t(`field.${h.key}` as I18nKey), form.header[h.key], (v) => setHeader(h.key, v), { type: h.type, ltr: h.ltr }))}
         </div>
+        {afterHeader && <div className="mt-3">{afterHeader}</div>}
       </section>
 
       <section>

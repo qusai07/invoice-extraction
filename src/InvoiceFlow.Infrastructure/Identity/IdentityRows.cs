@@ -32,7 +32,29 @@ public sealed class UserRow
     public DateTimeOffset CreatedAt { get; set; }
     public string CreatedBy { get; set; } = "";
     public DateTimeOffset? LastLoginAt { get; set; }
+
+    /// <summary>Authenticator secret, encrypted (<see cref="MfaSecretProtector"/>). Null = two-step sign-in off.</summary>
+    public string? MfaSecret { get; set; }
+
+    /// <summary>Secret shown during setup, until the user proves their app works with a first code.</summary>
+    public string? MfaPendingSecret { get; set; }
+
+    public DateTimeOffset? MfaEnabledAt { get; set; }
+
+    /// <summary>Time step of the last accepted code: a code can't be used twice.</summary>
+    public long? MfaLastTimeStep { get; set; }
+
     public byte[] RowVersion { get; set; } = [];
+}
+
+/// <summary>A one-time recovery code (only its hash). Used when the authenticator app is not available.</summary>
+public sealed class RecoveryCodeRow
+{
+    public Guid Id { get; set; }
+    public Guid UserId { get; set; }
+    public string CodeHash { get; set; } = "";
+    public DateTimeOffset CreatedAt { get; set; }
+    public DateTimeOffset? UsedAt { get; set; }
 }
 
 public sealed class RoleRow
@@ -116,6 +138,17 @@ internal static class IdentityModel
             e.Property(x => x.PreferredLanguage).HasMaxLength(8);
             e.Property(x => x.CreatedBy).HasMaxLength(256);
             e.Property(x => x.RowVersion).IsRowVersion();
+            e.Property(x => x.MfaSecret).HasMaxLength(256).IsUnicode(false);
+            e.Property(x => x.MfaPendingSecret).HasMaxLength(256).IsUnicode(false);
+        });
+
+        b.Entity<RecoveryCodeRow>(e =>
+        {
+            e.ToTable("RecoveryCodes");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.CodeHash).HasMaxLength(64).IsUnicode(false);
+            e.HasIndex(x => new { x.UserId, x.CodeHash }).IsUnique();
+            e.HasOne<UserRow>().WithMany().HasForeignKey(x => x.UserId).OnDelete(DeleteBehavior.Cascade);
         });
 
         b.Entity<RoleRow>(e =>

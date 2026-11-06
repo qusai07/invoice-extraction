@@ -117,6 +117,7 @@ public static class ServiceCollectionExtensions
 
         services.AddSingleton(session);
         services.AddSingleton<Identity.TokenIssuer>();
+        services.AddSingleton<Identity.MfaSecretProtector>();
         services.AddSingleton<Identity.PermissionResolver>();
         services.AddScoped<Identity.IdentityService>();
         services.AddScoped<Identity.UserAdminService>();

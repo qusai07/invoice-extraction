@@ -35,6 +35,29 @@ public static partial class IdentitySeeder
 
         await db.SaveChangesAsync(ct).ConfigureAwait(false);
 
+        // Super admin = every permission, always: add any that were introduced since the role was created.
+        var super = await db.Roles.Include(r => r.Permissions).FirstAsync(r => r.Name == BuiltInRoles.SuperAdmin, ct).ConfigureAwait(false);
+        var missing = Permissions.All.Except(super.Permissions.Select(p => p.Permission), StringComparer.Ordinal).ToList();
+        if (missing.Count > 0)
+        {
+            super.Permissions.AddRange(missing.Select(p => new RolePermissionRow { RoleId = super.Id, Permission = p }));
+            await db.SaveChangesAsync(ct).ConfigureAwait(false);
+        }
+
+        // The configured bootstrap admin is (or becomes) a super admin, also on systems seeded before the role existed.
+        var bootstrapEmail = configuration["Bootstrap:AdminEmail"]?.Trim();
+        if (!string.IsNullOrWhiteSpace(bootstrapEmail))
+        {
+            var key = IdentityService.Normalize(bootstrapEmail);
+            var existingAdmin = await db.Users.FirstOrDefaultAsync(u => u.NormalizedEmail == key && u.IsActive, ct).ConfigureAwait(false);
+            if (existingAdmin is not null && !await db.UserRoles.AnyAsync(ur => ur.UserId == existingAdmin.Id && ur.RoleId == super.Id, ct).ConfigureAwait(false))
+            {
+                GrantSuperAdmin(db, existingAdmin, super, time.GetUtcNow(), "Bootstrap administrator made super admin (Bootstrap:AdminEmail).");
+                await db.SaveChangesAsync(ct).ConfigureAwait(false);
+                LogSuperGranted(logger, existingAdmin.Email);
+            }
+        }
+
         var adminExists = await db.UserRoles
             .Join(db.Users.Where(u => u.IsActive), ur => ur.UserId, u => u.Id, (ur, _) => ur.RoleId)
             .Join(db.RolePermissions.Where(p => p.Permission == Permissions.AdminUsers), roleId => roleId, p => p.RoleId, (r, _) => r)
@@ -75,20 +98,37 @@ public static partial class IdentitySeeder
         user.MustChangePassword = true; // the bootstrap password lives in config; replace it at first login
         user.SecurityStamp = Guid.NewGuid().ToString("N");
 
-        var adminRole = await db.Roles.FirstAsync(r => r.Name == BuiltInRoles.SystemAdmin, ct).ConfigureAwait(false);
-        if (!await db.UserRoles.AnyAsync(ur => ur.UserId == user.Id && ur.RoleId == adminRole.Id, ct).ConfigureAwait(false))
+        if (!await db.UserRoles.AnyAsync(ur => ur.UserId == user.Id && ur.RoleId == super.Id, ct).ConfigureAwait(false))
         {
-            db.UserRoles.Add(new UserRoleRow { UserId = user.Id, RoleId = adminRole.Id });
+            GrantSuperAdmin(db, user, super, now, null);
         }
 
         db.SecurityEvents.Add(new SecurityEventRow
         {
             At = now, UserId = user.Id, Email = email, Event = "BootstrapAdmin", Actor = "system",
-            Details = "First administrator created from configuration; password change required at first login.",
+            Details = "First administrator created from configuration as super admin; password change required at first login.",
         });
         await db.SaveChangesAsync(ct).ConfigureAwait(false);
         LogBootstrapped(logger, email);
     }
+
+    private static void GrantSuperAdmin(InvoiceFlowDbContext db, UserRow user, RoleRow super, DateTimeOffset now, string? auditNote)
+    {
+        db.UserRoles.Add(new UserRoleRow { UserId = user.Id, RoleId = super.Id });
+        user.ApprovalUnlimited = true; // all permissions includes approving any amount (four-eyes still applies)
+        user.ApprovalLimit = null;
+        user.SecurityStamp = Guid.NewGuid().ToString("N"); // new rights apply at once
+        if (auditNote is not null)
+        {
+            db.SecurityEvents.Add(new SecurityEventRow
+            {
+                At = now, UserId = user.Id, Email = user.Email, Event = "SuperAdminGranted", Actor = "system", Details = auditNote,
+            });
+        }
+    }
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "{Email} was made super admin (it is the configured Bootstrap:AdminEmail).")]
+    private static partial void LogSuperGranted(ILogger logger, string email);
 
     [LoggerMessage(Level = LogLevel.Warning, Message = "No active administrator exists. Set Bootstrap:AdminEmail and Bootstrap:AdminPassword (user-secrets / environment) and restart.")]
     private static partial void LogNoAdmin(ILogger logger);

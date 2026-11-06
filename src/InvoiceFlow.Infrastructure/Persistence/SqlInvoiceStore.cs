@@ -101,9 +101,11 @@ public sealed class SqlInvoiceStore(InvoiceFlowDbContext db, TimeProvider time) 
             .Select(d => new { d.Id, d.FileName, d.Status, d.ReceivedAt, d.StatusChangedAt, d.SubmittedBy, d.SupplierName, d.InvoiceNumber, d.InvoiceDate, d.Currency, d.Total, d.ErrorCodes })
             .ToListAsync(cancellationToken).ConfigureAwait(false);
 
+        var names = await Identity.UserNames.ResolveAsync(db, rows.Select(r => r.SubmittedBy), cancellationToken).ConfigureAwait(false);
         return rows.Select(d => new InvoiceSummary(d.Id, d.FileName, d.Status, d.ReceivedAt, d.StatusChangedAt, d.SubmittedBy,
                 d.SupplierName, d.InvoiceNumber, d.InvoiceDate, d.Currency, d.Total,
-                string.IsNullOrEmpty(d.ErrorCodes) ? [] : d.ErrorCodes.Split(',')))
+                string.IsNullOrEmpty(d.ErrorCodes) ? [] : d.ErrorCodes.Split(','),
+                names.GetValueOrDefault(d.SubmittedBy)))
             .ToList();
     }
 
@@ -123,7 +125,34 @@ public sealed class SqlInvoiceStore(InvoiceFlowDbContext db, TimeProvider time) 
             .ToListAsync(cancellationToken).ConfigureAwait(false);
 
         var c = ToCase(row);
-        return new InvoiceDetails(c.Document.ToState(), c.Invoice, c.Extraction, c.Validation, corrections, audit);
+        var duplicateOf = row.Status == InvoiceStatus.Duplicate ? await FindOriginalAsync(row, cancellationToken).ConfigureAwait(false) : null;
+        var state = c.Document.ToState();
+        var people = await Identity.UserNames.ResolveAsync(db,
+            [state.SubmittedBy, state.ResolvedBy, state.ApprovedBy, .. audit.Select(a => a.Actor), .. corrections.Select(x => x.UserId)],
+            cancellationToken).ConfigureAwait(false);
+        return new InvoiceDetails(state, c.Invoice, c.Extraction, c.Validation, corrections, audit, duplicateOf, people);
+    }
+
+    /// <summary>The earliest other document this duplicate repeats: same file first, else same supplier + invoice number.</summary>
+    private async Task<DuplicateInfo?> FindOriginalAsync(DocumentRow dup, CancellationToken ct)
+    {
+        var others = db.Documents.AsNoTracking().Where(d => d.Id != dup.Id && d.Status != InvoiceStatus.Duplicate);
+
+        var sameFile = await others.Where(d => d.Sha256 == dup.Sha256).OrderBy(d => d.ReceivedAt)
+            .Select(d => new { d.Id, d.FileName, d.ReceivedAt, d.Status }).FirstOrDefaultAsync(ct).ConfigureAwait(false);
+        if (sameFile is not null)
+        {
+            return new DuplicateInfo(sameFile.Id, sameFile.FileName, sameFile.ReceivedAt, sameFile.Status, "file");
+        }
+
+        if (dup.SupplierId is null || dup.InvoiceNumberKey is null)
+        {
+            return null;
+        }
+
+        var sameNumber = await others.Where(d => d.SupplierId == dup.SupplierId && d.InvoiceNumberKey == dup.InvoiceNumberKey)
+            .OrderBy(d => d.ReceivedAt).Select(d => new { d.Id, d.FileName, d.ReceivedAt, d.Status }).FirstOrDefaultAsync(ct).ConfigureAwait(false);
+        return sameNumber is null ? null : new DuplicateInfo(sameNumber.Id, sameNumber.FileName, sameNumber.ReceivedAt, sameNumber.Status, "number");
     }
 
     public async IAsyncEnumerable<AuditExportRow> ExportAuditAsync(

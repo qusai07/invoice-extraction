@@ -11,6 +11,7 @@ public sealed class InvoiceFlowDbContext(DbContextOptions<InvoiceFlowDbContext> 
     public DbSet<AuditRow> AuditEvents => Set<AuditRow>();
     public DbSet<JobRow> PipelineJobs => Set<JobRow>();
     public DbSet<Identity.UserRow> Users => Set<Identity.UserRow>();
+    public DbSet<Identity.RecoveryCodeRow> RecoveryCodes => Set<Identity.RecoveryCodeRow>();
     public DbSet<Identity.RoleRow> Roles => Set<Identity.RoleRow>();
     public DbSet<Identity.RolePermissionRow> RolePermissions => Set<Identity.RolePermissionRow>();
     public DbSet<Identity.UserRoleRow> UserRoles => Set<Identity.UserRoleRow>();

@@ -1,23 +1,26 @@
 "use client";
 
-import { use, useCallback, useEffect, useMemo, useState } from "react";
+import { use, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, Check, Loader2, RotateCcw, Save, ShieldAlert, X } from "lucide-react";
+import { ArrowLeft, Check, Copy, FileSearch, Loader2, RotateCcw, Save, ShieldAlert, X } from "lucide-react";
 import clsx from "clsx";
 import { api, post, put } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { useI18n } from "@/lib/i18n";
+import { personLabel } from "@/lib/people";
 import { PROCESSING, emptyInvoice, type InvoiceDetails, type ValidationReport } from "@/lib/types";
 import { DocumentViewer, type Highlight } from "@/components/document-viewer";
 import { Findings } from "@/components/findings";
 import { History } from "@/components/history";
+import { PoPicker } from "@/components/po-picker";
 import { InvoiceForm, fromForm, toForm, type FormState } from "@/components/invoice-form";
 import { ReasonDialog, StatusBadge, Toast } from "@/components/ui";
 
 export default function InvoicePage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
-  const { t, money, dateTime } = useI18n();
+  const { t, lang, money, dateTime, status: statusLabel } = useI18n();
+  const panelRef = useRef<HTMLDivElement>(null);
   const { me, can } = useAuth();
   const qc = useQueryClient();
 
@@ -56,6 +59,7 @@ export default function InvoicePage({ params }: { params: Promise<{ id: string }
   const status = doc?.status;
   const editable = status === "NeedsReview" && can("review");
   const isFourEyesBlocked = !!doc && !!me && doc.resolvedBy === me.id;
+  const who = (userId: string) => personLabel(userId, data?.people?.[userId] ?? data?.people?.[userId.toLowerCase()], t);
 
   const errorFields = useMemo(() => {
     const s = new Set<string>();
@@ -94,9 +98,17 @@ export default function InvoicePage({ params }: { params: Promise<{ id: string }
     setInvalid(new Set());
     await act(async () => {
       const report = await put<ValidationReport>(`/invoices/${id}/data`, parsed.invoice);
-      setToast({ message: `${t("inv.findings")}: ${report.outcome}`, kind: report.outcome === "NeedsReview" ? "error" : "info" });
+      // Say what happened in words, and bring the list of problems into view.
+      const errors = report.findings.filter((f) => f.severity === "Error");
+      const first = errors[0] ? (lang === "ar" ? errors[0].messageAr : errors[0].messageEn) : "";
+      const more = errors.length > 1 ? ` (+${errors.length - 1})` : "";
+      setToast({
+        message: report.outcome === "NeedsReview" ? `${t("inv.stillReview")}: ${first}${more}` : `${t("inv.savedOk")}: ${statusLabel(report.outcome)}`,
+        kind: report.outcome === "NeedsReview" ? "error" : "info",
+      });
+      panelRef.current?.scrollTo({ top: 0, behavior: "smooth" });
     }).catch(() => undefined);
-  }, [form, editable, act, id, t]);
+  }, [form, editable, act, id, t, lang, statusLabel]);
 
   // Ctrl/Cmd+S saves.
   useEffect(() => {
@@ -144,15 +156,15 @@ export default function InvoicePage({ params }: { params: Promise<{ id: string }
           </div>
           <div className="mt-1 flex flex-wrap gap-x-4 text-xs text-slate-500">
             <span>{doc.fileName}</span>
-            <span>{dateTime(doc.receivedAt)} · {doc.submittedBy}</span>
+            <span>{dateTime(doc.receivedAt)} · <span dir="auto">{who(doc.submittedBy)}</span></span>
             {extraction && (
               <span>
                 {t("inv.extractedBy")} {extraction.usage.extractor}
                 {extraction.usage.model && extraction.usage.model !== "none" ? ` (${extraction.usage.model})` : ""} · {t("inv.cost")} ${extraction.usage.costUsd.toFixed(4)}
               </span>
             )}
-            {doc.resolvedBy && <span>{t("inv.resolvedBy")}: {doc.resolvedBy}</span>}
-            {doc.approvedBy && <span>{t("inv.approvedBy")}: {doc.approvedBy}</span>}
+            {doc.resolvedBy && <span>{t("inv.resolvedBy")}: <span dir="auto">{who(doc.resolvedBy)}</span></span>}
+            {doc.approvedBy && <span>{t("inv.approvedBy")}: <span dir="auto">{who(doc.approvedBy)}</span></span>}
             {doc.erpReference && <span>{t("inv.erp")}: <span className="ltr-value font-mono">{doc.erpReference}</span></span>}
           </div>
 
@@ -192,7 +204,7 @@ export default function InvoicePage({ params }: { params: Promise<{ id: string }
           </div>
         </div>
 
-        <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
+        <div ref={panelRef} className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
           {processing && (
             <p className="mb-3 flex items-center gap-2 rounded bg-sky-50 px-3 py-2 text-sm text-sky-800">
               <Loader2 size={16} className="animate-spin" /> {t("inv.processing")}
@@ -200,6 +212,39 @@ export default function InvoicePage({ params }: { params: Promise<{ id: string }
           )}
           {!editable && !processing && status === "NeedsReview" && (
             <p className="mb-3 rounded bg-slate-100 px-3 py-2 text-sm text-slate-600">{t("inv.readOnly")}</p>
+          )}
+
+          {status === "NeedsReview" && (!extraction || extraction.status === "Failed") && (
+            <div className="mb-4 flex gap-3 rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm">
+              <FileSearch size={18} className="mt-0.5 shrink-0 text-amber-700" />
+              <div>
+                <p className="font-medium text-amber-900">{t("inv.unread.title")}</p>
+                <p className="mt-0.5 text-amber-800">{extraction ? t("inv.unread.failed") : t("inv.unread.notConfigured")}</p>
+                {can("review") && (
+                  <button className="btn-secondary mt-2" disabled={busy || dirty}
+                    onClick={() => void act(() => post(`/invoices/${id}/reread`), t("inv.unread.started")).catch(() => undefined)}>
+                    <RotateCcw size={16} /> {t("inv.unread.retry")}
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
+
+          {status === "Duplicate" && (
+            <div className="mb-4 flex gap-3 rounded-lg border border-slate-200 bg-slate-50 p-4 text-sm">
+              <Copy size={18} className="mt-0.5 shrink-0 text-slate-500" />
+              <div>
+                <p className="font-medium text-slate-800">
+                  {data.duplicateOf?.reason === "number" ? t("inv.dup.number") : t("inv.dup.file")}
+                </p>
+                <p className="mt-0.5 text-slate-600">{t("inv.dup.why")}</p>
+                {data.duplicateOf && (
+                  <Link href={`/invoices/${data.duplicateOf.id}`} className="mt-2 inline-flex items-center gap-1.5 font-medium text-brand-600 hover:underline">
+                    {t("inv.dup.open")}: <bdi dir="auto">{data.duplicateOf.fileName}</bdi> · {dateTime(data.duplicateOf.receivedAt)} · <StatusBadge status={data.duplicateOf.status} />
+                  </Link>
+                )}
+              </div>
+            </div>
           )}
 
           {data.validation && (
@@ -221,7 +266,8 @@ export default function InvoicePage({ params }: { params: Promise<{ id: string }
             ))}
           </div>
 
-          {tab === "data" && form && (
+          {/* A duplicate copy that was never read has no data: don't show an empty form that looks editable. */}
+          {tab === "data" && form && !(status === "Duplicate" && !data.invoice) && (
             <InvoiceForm
               form={form}
               onChange={(f) => { setForm(f); setDirty(true); }}
@@ -231,9 +277,13 @@ export default function InvoicePage({ params }: { params: Promise<{ id: string }
               evidence={extraction?.evidence ?? []}
               lineMatches={dirty ? [] : data.validation?.lineMatches ?? []}
               onHighlight={setHighlight}
+              afterHeader={editable && errorFields.has("poNumber") ? (
+                <PoPicker invoiceId={id} current={form.header.poNumber}
+                  onPick={(po) => { setForm({ ...form, header: { ...form.header, poNumber: po } }); setDirty(true); }} />
+              ) : undefined}
             />
           )}
-          {tab === "history" && <History audit={data.audit} corrections={data.corrections} />}
+          {tab === "history" && <History audit={data.audit} corrections={data.corrections} people={data.people} />}
         </div>
       </section>
 

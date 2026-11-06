@@ -17,9 +17,10 @@ public static class InvoiceStateMachine
             [InvoiceStatus.Extracted] = [InvoiceStatus.Validating],
             [InvoiceStatus.Validating] =
                 [InvoiceStatus.Approved, InvoiceStatus.PendingApproval, InvoiceStatus.NeedsReview, InvoiceStatus.Duplicate],
-            // Corrected → re-validate; supervisor override → approved (or pending approval above the limit); or reject.
+            // Corrected → re-validate; supervisor override → approved (or pending approval above the limit); or reject;
+            // or read again when the first read produced nothing (reader not configured / failed).
             [InvoiceStatus.NeedsReview] =
-                [InvoiceStatus.Validating, InvoiceStatus.Approved, InvoiceStatus.PendingApproval, InvoiceStatus.Rejected],
+                [InvoiceStatus.Validating, InvoiceStatus.Approved, InvoiceStatus.PendingApproval, InvoiceStatus.Rejected, InvoiceStatus.Extracting],
             [InvoiceStatus.PendingApproval] = [InvoiceStatus.Approved, InvoiceStatus.Rejected, InvoiceStatus.NeedsReview],
             [InvoiceStatus.Approved] = [InvoiceStatus.Posting],
             [InvoiceStatus.Posting] = [InvoiceStatus.Posted, InvoiceStatus.PostingFailed],
