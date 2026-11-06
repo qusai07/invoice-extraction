@@ -75,6 +75,8 @@ Without Azure OpenAI settings, uploads go to review for manual entry. To enable 
 
 ```powershell
 dotnet test InvoiceFlow.sln                     # unit + integration (Docker must be running)
+# No Docker? Use an existing SQL Server instead (a temporary database is created and dropped):
+#   $env:INVOICEFLOW_TEST_SQL = "Server=.;Integrated Security=True;TrustServerCertificate=True"
 dotnet run --project evals/InvoiceFlow.Evals -- run --data evals/data --extractor ground-truth --expect-perfect
 ```
 

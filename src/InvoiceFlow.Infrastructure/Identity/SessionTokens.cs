@@ -154,16 +154,27 @@ public sealed class TokenIssuer(SessionOptions options, TimeProvider time)
         return (id, stamp);
     }
 
-    public TokenValidationParameters ValidationParameters() => new()
+    public TokenValidationParameters ValidationParameters()
     {
-        ValidIssuer = options.Issuer,
-        ValidAudience = options.Audience,
-        IssuerSigningKey = options.Key(),
-        ValidAlgorithms = [SecurityAlgorithms.HmacSha256],
-        ClockSkew = TimeSpan.FromSeconds(30),
-        NameClaimType = "name",
-        RoleClaimType = ClaimTypes.Role,
-    };
+        var p = new TokenValidationParameters
+        {
+            ValidIssuer = options.Issuer,
+            ValidAudience = options.Audience,
+            IssuerSigningKey = options.Key(),
+            ValidAlgorithms = [SecurityAlgorithms.HmacSha256],
+            ClockSkew = TimeSpan.FromSeconds(30),
+            NameClaimType = "name",
+            RoleClaimType = ClaimTypes.Role,
+        };
+
+        // Check expiry with the same clock that issued the token (TimeProvider), not the machine clock.
+        p.LifetimeValidator = (notBefore, expires, _, v) =>
+        {
+            var now = time.GetUtcNow().UtcDateTime;
+            return (notBefore is null || notBefore.Value <= now + v.ClockSkew) && expires is not null && expires.Value > now - v.ClockSkew;
+        };
+        return p;
+    }
 
     /// <summary>256 random bits, URL-safe. Only its hash is stored.</summary>
     public static string NewRefreshToken() => Base64UrlEncoder.Encode(RandomNumberGenerator.GetBytes(32));

@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using InvoiceFlow.Api;
+using InvoiceFlow.Infrastructure.Identity;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.DependencyInjection;
@@ -18,7 +19,10 @@ public sealed class AuthTests : IDisposable
     private const string StrongPassword = "lantern orbit mango 2026";
 
     private readonly WebApplicationFactory<Program> _app;
-    private readonly MovableTime _time = new(DateTimeOffset.UtcNow);
+
+    // Shared by all tests in the run (one database): the admin's state, incl. the last used code step, outlives a test.
+    private static readonly MovableTime _time = new(DateTimeOffset.UtcNow);
+    private static byte[]? _mfaSecret;
 
     public AuthTests(InvoiceFlowFactory factory)
     {
@@ -27,6 +31,7 @@ public sealed class AuthTests : IDisposable
         {
             b.UseSetting("Auth:Mode", "Session");
             b.UseSetting("Auth:Session:SigningKey", Convert.ToBase64String(new byte[32].Select((_, i) => (byte)(i * 7 + 3)).ToArray()));
+            b.UseSetting("Auth:Session:MfaEncryptionKey", Convert.ToBase64String(new byte[32].Select((_, i) => (byte)(i * 11 + 5)).ToArray()));
             b.UseSetting("Bootstrap:AdminEmail", AdminEmail);
             b.UseSetting("Bootstrap:AdminPassword", BootstrapPassword);
             b.ConfigureTestServices(s => s.AddSingleton<TimeProvider>(_time));
@@ -38,19 +43,79 @@ public sealed class AuthTests : IDisposable
     private sealed class MovableTime(DateTimeOffset start) : TimeProvider
     {
         private DateTimeOffset _now = start;
-        public void Advance(TimeSpan by) => _now += by;
-        public override DateTimeOffset GetUtcNow() => _now;
+        private readonly Lock _lock = new();
+
+        public void Advance(TimeSpan by)
+        {
+            lock (_lock)
+            {
+                _now += by;
+            }
+        }
+
+        public override DateTimeOffset GetUtcNow()
+        {
+            lock (_lock)
+            {
+                return _now;
+            }
+        }
     }
+
+    private sealed record CodeStep(bool CodeRequired, string Challenge);
 
     private static Uri U(string path) => new(path, UriKind.Relative);
 
     // https so the Secure refresh cookie is stored and sent; cookies are handled per client.
     private HttpClient Browser() => _app.CreateClient(new WebApplicationFactoryClientOptions { BaseAddress = new Uri("https://localhost"), HandleCookies = true });
 
+    /// <summary>A fresh code from the "phone": the clock moves one step on, as a code works only once.</summary>
+    private static string NextCode()
+    {
+        _time.Advance(TimeSpan.FromSeconds(Totp.StepSeconds));
+        return Totp.Code(_mfaSecret!, Totp.StepAt(_time.GetUtcNow()));
+    }
+
+    /// <summary>Password step, then (when the account uses two-step sign-in) the code step with a valid code.</summary>
     private static async Task<(HttpStatusCode Status, AuthEndpoints.SessionResponse? Session)> LoginAsync(HttpClient c, string email, string password)
     {
         var r = await c.PostAsJsonAsync(U("/api/auth/login"), new { email, password }, Json);
-        return (r.StatusCode, r.IsSuccessStatusCode ? await r.Content.ReadFromJsonAsync<AuthEndpoints.SessionResponse>(Json) : null);
+        if (!r.IsSuccessStatusCode)
+        {
+            return (r.StatusCode, null);
+        }
+
+        var body = await r.Content.ReadAsStringAsync();
+        if (body.Contains("\"codeRequired\":true", StringComparison.Ordinal))
+        {
+            var step = System.Text.Json.JsonSerializer.Deserialize<CodeStep>(body, Json)!;
+            r = await c.PostAsJsonAsync(U("/api/auth/login/code"), new { challenge = step.Challenge, code = NextCode() }, Json);
+            if (!r.IsSuccessStatusCode)
+            {
+                return (r.StatusCode, null);
+            }
+
+            body = await r.Content.ReadAsStringAsync();
+        }
+
+        return (HttpStatusCode.OK, System.Text.Json.JsonSerializer.Deserialize<AuthEndpoints.SessionResponse>(body, Json));
+    }
+
+    /// <summary>Required for the admin: set up the authenticator app (QR secret → first code). Returns the new session's token.</summary>
+    private static async Task<(string Token, IReadOnlyList<string> RecoveryCodes)> SetUpMfaAsync(HttpClient c, string token)
+    {
+        var setup = Bearer(HttpMethod.Post, "/api/auth/mfa/setup", token);
+        var r = await c.SendAsync(setup);
+        r.EnsureSuccessStatusCode();
+        var s = await r.Content.ReadFromJsonAsync<IdentityService.MfaSetup>(Json);
+        _mfaSecret = Base32.Decode(s!.Secret);
+
+        var enable = Bearer(HttpMethod.Post, "/api/auth/mfa/enable", token);
+        enable.Content = JsonContent.Create(new { code = NextCode() });
+        r = await c.SendAsync(enable);
+        r.EnsureSuccessStatusCode();
+        var codes = await r.Content.ReadFromJsonAsync<AuthEndpoints.RecoveryCodesResponse>(Json);
+        return (token, codes!.RecoveryCodes);
     }
 
     private static HttpRequestMessage Csrf(HttpMethod method, string path)
@@ -67,7 +132,10 @@ public sealed class AuthTests : IDisposable
         return m;
     }
 
-    /// <summary>Signs in as the bootstrap admin, changing the password first if still required.</summary>
+    /// <summary>
+    /// Signs in as the bootstrap admin (super admin), first changing the bootstrap password and setting up two-step
+    /// sign-in if that hasn't happened yet in this run.
+    /// </summary>
     private async Task<(HttpClient Client, string Token)> AdminAsync()
     {
         var c = Browser();
@@ -82,7 +150,12 @@ public sealed class AuthTests : IDisposable
             session = await r.Content.ReadFromJsonAsync<AuthEndpoints.SessionResponse>(Json);
         }
 
-        return (c, session!.AccessToken);
+        if (session!.User.MfaSetupRequired)
+        {
+            await SetUpMfaAsync(c, session.AccessToken);
+        }
+
+        return (c, session.AccessToken);
     }
 
     [Fact]
@@ -113,11 +186,60 @@ public sealed class AuthTests : IDisposable
         changed.EnsureSuccessStatusCode();
         var fresh = await changed.Content.ReadFromJsonAsync<AuthEndpoints.SessionResponse>(Json);
         Assert.False(fresh!.User.MustChangePassword);
-        Assert.Contains("admin.users", fresh.User.Permissions);
+
+        // Next: two-step sign-in is required for an admin. Still no permissions until it is on.
+        Assert.True(fresh.User.MfaSetupRequired);
+        Assert.Empty(fresh.User.Permissions);
+        Assert.Equal(HttpStatusCode.Forbidden, (await c.SendAsync(Bearer(HttpMethod.Get, "/api/invoices", fresh.AccessToken))).StatusCode);
+        await SetUpMfaAsync(c, fresh.AccessToken);
 
         Assert.Equal(HttpStatusCode.OK, (await c.SendAsync(Bearer(HttpMethod.Get, "/api/invoices", fresh.AccessToken))).StatusCode);
+        var me = await (await c.SendAsync(Bearer(HttpMethod.Get, "/api/me", fresh.AccessToken))).Content.ReadFromJsonAsync<AuthEndpoints.MeResponse>(Json);
+        Assert.True(me!.MfaEnabled);
+        Assert.Contains("admin.users", me.Permissions);
+
         // The token from before the change is dead (security stamp changed).
         Assert.Equal(HttpStatusCode.Unauthorized, (await c.SendAsync(Bearer(HttpMethod.Get, "/api/me", session.AccessToken))).StatusCode);
+    }
+
+    [Fact]
+    public async Task Two_step_sign_in_needs_a_valid_unused_code()
+    {
+        var (admin, _) = await AdminAsync();
+        admin.Dispose();
+        using var c = Browser();
+
+        // Password alone gives no session, only a short-lived challenge that is useless as an access token.
+        var first = await c.PostAsJsonAsync(U("/api/auth/login"), new { email = AdminEmail, password = StrongPassword }, Json);
+        var step = await first.Content.ReadFromJsonAsync<CodeStep>(Json);
+        Assert.True(step!.CodeRequired);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await c.SendAsync(Bearer(HttpMethod.Get, "/api/me", step.Challenge))).StatusCode);
+
+        // Wrong code → refused; the right code → session; the same code again → refused (single use).
+        Assert.Equal(HttpStatusCode.Unauthorized,
+            (await c.PostAsJsonAsync(U("/api/auth/login/code"), new { challenge = step.Challenge, code = "000000" }, Json)).StatusCode);
+        var code = NextCode();
+        Assert.Equal(HttpStatusCode.OK,
+            (await c.PostAsJsonAsync(U("/api/auth/login/code"), new { challenge = step.Challenge, code }, Json)).StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized,
+            (await c.PostAsJsonAsync(U("/api/auth/login/code"), new { challenge = step.Challenge, code }, Json)).StatusCode);
+
+        // The challenge expires after a few minutes.
+        _time.Advance(TimeSpan.FromMinutes(6));
+        Assert.Equal(HttpStatusCode.Unauthorized,
+            (await c.PostAsJsonAsync(U("/api/auth/login/code"), new { challenge = step.Challenge, code = NextCode() }, Json)).StatusCode);
+    }
+
+    [Fact]
+    public async Task Required_two_step_sign_in_cannot_be_turned_off()
+    {
+        var (c, token) = await AdminAsync();
+        using (c)
+        {
+            var off = Bearer(HttpMethod.Post, "/api/auth/mfa/disable", token);
+            off.Content = JsonContent.Create(new { password = StrongPassword, code = NextCode() });
+            Assert.Equal(HttpStatusCode.Forbidden, (await c.SendAsync(off)).StatusCode);
+        }
     }
 
     [Fact]
@@ -129,7 +251,10 @@ public sealed class AuthTests : IDisposable
 
         Assert.Equal(HttpStatusCode.Unauthorized, unknown.StatusCode);
         Assert.Equal(HttpStatusCode.Unauthorized, wrong.StatusCode);
-        Assert.Equal(await unknown.Content.ReadAsStringAsync(), await wrong.Content.ReadAsStringAsync());
+        // Same message (only the per-request trace id differs): the answer doesn't reveal whether the account exists.
+        var a = await unknown.Content.ReadFromJsonAsync<Microsoft.AspNetCore.Mvc.ProblemDetails>(Json);
+        var b = await wrong.Content.ReadFromJsonAsync<Microsoft.AspNetCore.Mvc.ProblemDetails>(Json);
+        Assert.Equal((a!.Title, a.Detail, a.Status), (b!.Title, b.Detail, b.Status));
     }
 
     [Fact]

@@ -16,6 +16,12 @@ public sealed class RateLimitOptions
 
     /// <summary>Uploads per minute per user. Bulk import should use a dedicated channel (email / API batch).</summary>
     public int UploadsPerMinute { get; set; } = 60;
+
+    /// <summary>
+    /// Sign-in attempts (password and code steps, two-step setup) per minute per IP address: slows password spraying.
+    /// Generous because a whole office may share one address; each account is also locked after 5 wrong attempts.
+    /// </summary>
+    public int LoginsPerMinute { get; set; } = 30;
 }
 
 public static class Hardening

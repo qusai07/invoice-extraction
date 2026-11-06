@@ -41,11 +41,14 @@ public static class AuthEndpoints
     // Same answer for unknown email, wrong password and a locked account (lockout still applies, silently).
     private const string SignInFailedMessage = "Incorrect email or password.";
 
-    public static void AddLoginRateLimit(this IServiceCollection services) =>
+    public static void AddLoginRateLimit(this IServiceCollection services, IConfiguration configuration)
+    {
+        var perMinute = Math.Max(1, (configuration.GetSection(RateLimitOptions.SectionName).Get<RateLimitOptions>() ?? new RateLimitOptions()).LoginsPerMinute);
         services.Configure<Microsoft.AspNetCore.RateLimiting.RateLimiterOptions>(o =>
             o.AddPolicy(LoginRateLimit, ctx => RateLimitPartition.GetFixedWindowLimiter(
                 "ip:" + (ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown"),
-                _ => new FixedWindowRateLimiterOptions { PermitLimit = 10, Window = TimeSpan.FromMinutes(1) })));
+                _ => new FixedWindowRateLimiterOptions { PermitLimit = perMinute, Window = TimeSpan.FromMinutes(1) })));
+    }
 
     public static void MapAuthEndpoints(this IEndpointRouteBuilder app)
     {

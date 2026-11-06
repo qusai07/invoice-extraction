@@ -32,7 +32,7 @@ if (builder.Configuration.GetValue<bool>("Pipeline:RunInProcess"))
 
 builder.AddInvoiceFlowAuth();
 builder.AddInvoiceFlowHardening();
-builder.Services.AddLoginRateLimit();
+builder.Services.AddLoginRateLimit(builder.Configuration);
 
 // Behind a TLS-terminating proxy (Azure Container Apps ingress, reverse proxy): trust X-Forwarded-*.
 var behindProxy = builder.Configuration.GetValue<bool>("ForwardedHeaders:Enabled");

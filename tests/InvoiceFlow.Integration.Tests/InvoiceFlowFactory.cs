@@ -20,17 +20,51 @@ public sealed class InvoiceFlowFactory : WebApplicationFactory<Program>, IAsyncL
 {
     public static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web) { Converters = { new JsonStringEnumConverter() } };
 
-    private readonly MsSqlContainer _sql = new MsSqlBuilder("mcr.microsoft.com/mssql/server:2022-latest").Build();
+    /// <summary>
+    /// Optional: run against an existing SQL Server instead of Docker (e.g. a developer machine without Docker):
+    /// INVOICEFLOW_TEST_SQL="Server=.;Integrated Security=True;TrustServerCertificate=True". A uniquely named database is
+    /// created for the run and dropped afterwards. Unset (CI) → a throwaway SQL Server container.
+    /// </summary>
+    private static readonly string? ExternalSql = Environment.GetEnvironmentVariable("INVOICEFLOW_TEST_SQL");
+
+    private readonly MsSqlContainer? _sql = string.IsNullOrWhiteSpace(ExternalSql) ? new MsSqlBuilder("mcr.microsoft.com/mssql/server:2022-latest").Build() : null;
+    private readonly string _externalDb = "InvoiceFlowTests_" + Guid.NewGuid().ToString("N")[..12];
     private readonly string _storage = Path.Combine(Path.GetTempPath(), "invoiceflow-tests-" + Guid.NewGuid().ToString("N"));
 
     public static string RepoRoot { get; } = FindRepoRoot();
     public static string DataDir => Path.Combine(RepoRoot, "evals", "data");
 
-    public async Task InitializeAsync() => await _sql.StartAsync();
+    private string ConnectionString => _sql is not null
+        ? _sql.GetConnectionString()
+        : new Microsoft.Data.SqlClient.SqlConnectionStringBuilder(ExternalSql) { InitialCatalog = _externalDb }.ConnectionString;
+
+    public async Task InitializeAsync()
+    {
+        if (_sql is not null)
+        {
+            await _sql.StartAsync();
+        }
+    }
 
     async Task IAsyncLifetime.DisposeAsync()
     {
-        await _sql.DisposeAsync();
+        if (_sql is not null)
+        {
+            await _sql.DisposeAsync();
+        }
+        else
+        {
+            Microsoft.Data.SqlClient.SqlConnection.ClearAllPools();
+            await using var master = new Microsoft.Data.SqlClient.SqlConnection(
+                new Microsoft.Data.SqlClient.SqlConnectionStringBuilder(ExternalSql) { InitialCatalog = "master" }.ConnectionString);
+            await master.OpenAsync();
+            await using var drop = master.CreateCommand();
+#pragma warning disable CA2100 // name is generated above (hex), not user input
+            drop.CommandText = $"IF DB_ID('{_externalDb}') IS NOT NULL BEGIN ALTER DATABASE [{_externalDb}] SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE [{_externalDb}]; END";
+#pragma warning restore CA2100
+            await drop.ExecuteNonQueryAsync();
+        }
+
         try
         {
             Directory.Delete(_storage, recursive: true);
@@ -44,7 +78,7 @@ public sealed class InvoiceFlowFactory : WebApplicationFactory<Program>, IAsyncL
     {
         // "Testing": no appsettings.Development.json, no user-secrets → only the settings below apply.
         builder.UseEnvironment("Testing");
-        builder.UseSetting("ConnectionStrings:InvoiceFlow", _sql.GetConnectionString());
+        builder.UseSetting("ConnectionStrings:InvoiceFlow", ConnectionString);
         builder.UseSetting("Auth:Mode", "Dev");
         builder.UseSetting("Database:MigrateOnStartup", "true");
         builder.UseSetting("Pipeline:RunInProcess", "false"); // tests drive the pipeline explicitly
@@ -54,6 +88,7 @@ public sealed class InvoiceFlowFactory : WebApplicationFactory<Program>, IAsyncL
         builder.UseSetting("Validation:ApprovalThreshold", "100000");
         builder.UseSetting("Security:MalwareScan:Provider", "None"); // must be explicit outside Development
         builder.UseSetting("RateLimits:UploadsPerMinute", "10000");
+        builder.UseSetting("RateLimits:LoginsPerMinute", "10000"); // all test clients share one "IP"
 
         builder.ConfigureTestServices(s => s.AddSingleton<IInvoiceExtractor>(new DatasetExtractor(DataDir)));
     }
